@@ -67,6 +67,17 @@ TTS_BACKEND=gsv python -m app.main   # Linux / macOS
 - **Windows**：torchaudio ≥ 2.9 的 `load()` 默认走 torchcodec，需要完整版 FFmpeg DLL。本项目在 `app/backends/gsv.py` 中把 `torchaudio.load` 补丁为 soundfile 实现，无需安装 FFmpeg。
 - **低内存 CPU 机器**：`scripts/quantize_pretrained.py` 可将 BERT/HuBERT 预训练模型离线量化为 int8 旁挂文件；CPU 模式下后端直接加载量化文件，避免"先读 fp32 再量化"的内存峰值。
 
+## 预置音色包
+
+开箱即用的音色以 [GitHub Release 资源](https://github.com/umeiko/umeko-tts-server/releases/tag/voices-v1.0.0) 形式发布——每个 zip 含一个音色的 GPT 权重 + SoVITS 权重 + 参考音 + 元数据：
+
+```bash
+python scripts/download_voices.py            # 安装全部预置音色
+python scripts/download_voices.py mambo      # 或只装指定的
+```
+
+脚本会解压到 `data/voices/<音色名>/` 并合并音色注册表，启动服务即可使用。发布自己的音色包：`python scripts/pack_voices.py`。
+
 ## 配置项（环境变量）
 
 | 变量 | 默认值 | 说明 |
@@ -166,7 +177,9 @@ umeko-tts-server/
 ├── scripts/
 │   ├── smoke_test.py          # 冒烟测试
 │   ├── quantize_pretrained.py # 预训练模型 int8 离线量化（低内存 CPU 用）
-│   └── public_e2e.py          # 针对已部署实例的端到端测试
+│   ├── public_e2e.py          # 针对已部署实例的端到端测试
+│   ├── pack_voices.py         # 把 data/ 里的音色打包成 release zip
+│   └── download_voices.py     # 从 GitHub Release 下载预置音色
 ├── data/                  # 运行时生成：voices.json + voices/<音色>/
 └── requirements.txt
 ```

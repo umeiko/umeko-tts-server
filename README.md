@@ -67,6 +67,17 @@ Notes:
 - **Windows**: torchaudio ≥ 2.9 defaults to torchcodec for `load()`, which needs full FFmpeg DLLs. This project monkey-patches `torchaudio.load` with a soundfile implementation (`app/backends/gsv.py`), so no FFmpeg install is required.
 - **Low-memory CPU machines**: `scripts/quantize_pretrained.py` pre-quantizes the BERT/HuBERT pretrained models to int8 sidecar files; on CPU the backend loads them directly, avoiding the fp32 load-then-quantize memory spike.
 
+## Prebuilt Voice Packs
+
+Ready-to-use voices are published as [GitHub Release assets](https://github.com/umeiko/umeko-tts-server/releases/tag/voices-v1.0.0) — one zip per voice (GPT weights + SoVITS weights + reference audio + metadata):
+
+```bash
+python scripts/download_voices.py            # install all prebuilt voices
+python scripts/download_voices.py mambo      # or pick specific ones
+```
+
+The script extracts into `data/voices/<name>/` and merges the voice registry — start the service and the voices are ready. To publish your own packs: `python scripts/pack_voices.py`.
+
 ## Configuration (Environment Variables)
 
 | Variable | Default | Description |
@@ -166,7 +177,9 @@ umeko-tts-server/
 ├── scripts/
 │   ├── smoke_test.py          # Smoke test
 │   ├── quantize_pretrained.py # Pre-quantize BERT/HuBERT to int8 (low-memory CPU)
-│   └── public_e2e.py          # End-to-end test against a deployed instance
+│   ├── public_e2e.py          # End-to-end test against a deployed instance
+│   ├── pack_voices.py         # Pack voices in data/ into release zips
+│   └── download_voices.py     # Download prebuilt voices from GitHub Release
 ├── data/                  # Runtime generated: voices.json + voices/<name>/
 └── requirements.txt
 ```
