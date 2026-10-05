@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Umeko TTS 控制台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">Umeko TTS</div>
+    <div class="status-bar" id="statusBar">
+      <span class="stat" id="stBackend">后端: …</span>
+      <span class="stat" id="stDevice">设备: …</span>
+      <span class="stat" id="stWorkers">线程: …</span>
+      <span class="stat" id="stQueue">队列: …</span>
+      <span class="stat" id="stDefault">默认音色: …</span>
+      <span class="stat" id="stUptime">运行: …</span>
+    </div>
+  </header>
+
+  <div class="banner hidden" id="mockBanner">
+    当前运行的是演示后端（未接入 GPT-SoVITS），输出为正弦波测试音频。配置 GPT-SoVITS 后重启服务即可获得真实合成效果。
+  </div>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="voices">音色管理</button>
+    <button class="tab" data-tab="synth">在线合成</button>
+    <button class="tab" data-tab="docs">接口文档</button>
+  </nav>
+
+  <main>
+    <!-- 音色管理 -->
+    <section id="tab-voices" class="tab-page active">
+      <div class="toolbar">
+        <button class="btn primary" id="btnNewVoice">+ 新增音色</button>
+        <button class="btn" id="btnRefresh">刷新</button>
+      </div>
+      <div class="voice-grid" id="voiceGrid">
+        <div class="empty" id="voiceEmpty">暂无音色，点击「新增音色」创建</div>
+      </div>
+    </section>
+
+    <!-- 在线合成 -->
+    <section id="tab-synth" class="tab-page">
+      <div class="panel">
+        <div class="form-row">
+          <label>音色</label>
+          <select id="fVoice"></select>
+        </div>
+        <div class="form-row">
+          <label>文本 <span class="req">*</span></label>
+          <textarea id="fText" rows="5" placeholder="输入要合成语音的文本，支持中 / 英 / 日 / 韩 / 粤语">你好世界，这是语音合成测试。</textarea>
+        </div>
+        <div class="param-grid">
+          <div class="form-row">
+            <label>语种</label>
+            <select id="fLang">
+              <option value="zh">zh 中文</option>
+              <option value="en">en 英文</option>
+              <option value="ja">ja 日文</option>
+              <option value="ko">ko 韩文</option>
+              <option value="yue">yue 粤语</option>
+              <option value="auto">auto 自动检测</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>语速 (0.5~2.0)</label>
+            <input type="number" id="fSpeed" value="1.0" step="0.1" min="0.5" max="2.0">
+          </div>
+          <div class="form-row">
+            <label>top_k (1~100)</label>
+            <input type="number" id="fTopK" value="15" step="1" min="1" max="100">
+          </div>
+          <div class="form-row">
+            <label>top_p (0~1)</label>
+            <input type="number" id="fTopP" value="1.0" step="0.05" min="0" max="1">
+          </div>
+          <div class="form-row">
+            <label>temperature (0.1~2.0)</label>
+            <input type="number" id="fTemp" value="1.0" step="0.1" min="0.1" max="2.0">
+          </div>
+          <div class="form-row">
+            <label>切分符号</label>
+            <input type="text" id="fCutPunc" placeholder="留空自动切分，如: 。！？">
+          </div>
+          <div class="form-row">
+            <label>最大秒数 (0.5~60)</label>
+            <input type="number" id="fMaxSec" value="10" step="1" min="0.5" max="60">
+          </div>
+        </div>
+        <div class="form-row">
+          <button class="btn primary big" id="btnSynth">开始合成</button>
+        </div>
+        <div class="result hidden" id="synthResult">
+          <div class="result-meta" id="synthMeta"></div>
+          <audio id="synthAudio" controls></audio>
+          <a class="btn" id="synthDownload" download="tts.wav">下载 WAV</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- 接口文档 -->
+    <section id="tab-docs" class="tab-page">
+      <div class="panel doc">
+        <h3>TTS 合成接口</h3>
+        <p><code>POST <span id="docBase"></span>/tts</code> &nbsp;·&nbsp; <code>Content-Type: application/json</code></p>
+        <table>
+          <thead><tr><th>参数</th><th>类型</th><th>必填</th><th>默认值</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td>text</td><td>string</td><td>是</td><td>—</td><td>要合成的文本，支持中/英/日/韩/粤语</td></tr>
+            <tr><td>voice</td><td>string</td><td>否</td><td>默认音色</td><td>扩展参数：音色名称</td></tr>
+            <tr><td>text_lang</td><td>string</td><td>否</td><td>zh</td><td>zh / en / ja / ko / yue / auto</td></tr>
+            <tr><td>speed_factor</td><td>float</td><td>否</td><td>1.0</td><td>语速倍率 0.5~2.0</td></tr>
+            <tr><td>top_k</td><td>int</td><td>否</td><td>15</td><td>采样 top-k，1~100</td></tr>
+            <tr><td>top_p</td><td>float</td><td>否</td><td>1.0</td><td>核采样阈值 0~1</td></tr>
+            <tr><td>temperature</td><td>float</td><td>否</td><td>1.0</td><td>采样温度 0.1~2.0</td></tr>
+            <tr><td>cut_punc</td><td>string</td><td>否</td><td>""</td><td>手动指定切分标点，留空自动切分</td></tr>
+            <tr><td>max_sec</td><td>float</td><td>否</td><td>10.0</td><td>最大音频秒数，最长 60</td></tr>
+          </tbody>
+        </table>
+        <p>成功返回 <code>audio/wav</code> 二进制；失败返回 <code>{"message": "错误描述"}</code>。</p>
+        <h4>最小示例</h4>
+        <pre id="docCurlMin"></pre>
+        <h4>完整示例</h4>
+        <pre id="docCurlFull"></pre>
+        <h3>管理接口</h3>
+        <table>
+          <thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td>GET</td><td>/api/status</td><td>服务状态（后端 / 队列 / 运行时长）</td></tr>
+            <tr><td>GET</td><td>/api/voices</td><td>音色列表</td></tr>
+            <tr><td>POST</td><td>/api/voices</td><td>新增音色（multipart：name*、description、ref_text、ref_lang、gpt_file、sovits_file、ref_audio）</td></tr>
+            <tr><td>PUT</td><td>/api/voices/{name}</td><td>更新音色（字段与新增相同，均可选）</td></tr>
+            <tr><td>DELETE</td><td>/api/voices/{name}</td><td>删除音色及其文件</td></tr>
+            <tr><td>POST</td><td>/api/voices/{name}/default</td><td>设为默认音色</td></tr>
+            <tr><td>GET</td><td>/api/voices/{name}/ref-audio</td><td>下载参考音频</td></tr>
+          </tbody>
+        </table>
+        <p>设置环境变量 <code>TTS_ADMIN_TOKEN</code> 后，管理接口需携带请求头 <code>X-Admin-Token</code>。</p>
+      </div>
+    </section>
+  </main>
+
+  <!-- 音色编辑弹窗 -->
+  <div class="modal-mask hidden" id="voiceModal">
+    <div class="modal">
+      <div class="modal-title" id="voiceModalTitle">新增音色</div>
+      <div class="form-row">
+        <label>名称 <span class="req">*</span></label>
+        <input type="text" id="vName" placeholder="中英文、数字、_、-，1-64 字">
+      </div>
+      <div class="form-row">
+        <label>描述</label>
+        <input type="text" id="vDesc" placeholder="选填">
+      </div>
+      <div class="form-row">
+        <label>参考音频</label>
+        <input type="file" id="vRefAudio" accept=".wav,.mp3,.ogg,.flac,.m4a">
+        <div class="hint">3~10 秒清晰人声，zero-shot 克隆的音源</div>
+      </div>
+      <div class="form-row">
+        <label>参考文本</label>
+        <textarea id="vRefText" rows="2" placeholder="参考音频对应的文字内容"></textarea>
+      </div>
+      <div class="form-row">
+        <label>参考语种</label>
+        <select id="vRefLang">
+          <option value="zh">zh 中文</option>
+          <option value="en">en 英文</option>
+          <option value="ja">ja 日文</option>
+          <option value="ko">ko 韩文</option>
+          <option value="yue">yue 粤语</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>GPT 权重</label>
+        <input type="file" id="vGpt" accept=".ckpt,.safetensors">
+        <div class="hint">.ckpt（-e15 等训练产物）</div>
+      </div>
+      <div class="form-row">
+        <label>SoVITS 权重</label>
+        <input type="file" id="vSovits" accept=".pth,.ckpt,.safetensors">
+        <div class="hint">.pth（s2G… 或微调产物）</div>
+      </div>
+      <div class="progress hidden" id="uploadProgress"><div class="progress-inner" id="uploadProgressBar"></div></div>
+      <div class="modal-actions">
+        <button class="btn" id="btnVoiceCancel">取消</button>
+        <button class="btn primary" id="btnVoiceSave">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 管理令牌弹窗 -->
+  <div class="modal-mask hidden" id="tokenModal">
+    <div class="modal">
+      <div class="modal-title">需要管理令牌</div>
+      <div class="form-row">
+        <label>X-Admin-Token</label>
+        <input type="password" id="tokenInput" placeholder="服务端 TTS_ADMIN_TOKEN 的值">
+      </div>
+      <div class="modal-actions">
+        <button class="btn primary" id="btnTokenSave">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-wrap" id="toastWrap"></div>
+  <script src="app.js"></script>
+</body>
+</html>

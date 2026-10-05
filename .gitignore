@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 运行时数据（音色、权重、参考音频）
+data/
+
+# GPT-SoVITS 仓库（本地克隆，勿提交）
+GPT-SoVITS/
+
+# 其他
+*.log
+.env
+tmp/
+.tmp-dl/
+
+# 本机推理配置（含绝对路径，每台机器自行维护）
+gsv_tts_infer.yaml
