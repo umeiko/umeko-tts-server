@@ -11,72 +11,114 @@ A text-to-speech service and admin console built on [GPT-SoVITS](https://github.
 - **Hot weight switching**: the model swaps automatically per requested voice; loaded weights are cached and reused, so switching costs nothing
 - **Concurrency**: requests run in a thread pool (auto-sized from CPU cores + available memory); inference is guarded by a global serial lock — requests queue up cleanly, never race, and the event loop never blocks
 - **Web console**: voice management, online audition, live queue status, API docs — pure static pages, no build step
-- **Demo backend**: falls back to a sine-wave mock backend when GPT-SoVITS is not installed, so the API / console / concurrency behavior can be fully self-tested
+- **Prebuilt voice packs**: one-command install from GitHub Release (`scripts/download_voices.py`)
 
-## Quick Start (Demo Mode)
+## Requirements
+
+| Backend | Minimum | Recommended | Speed (short sentence) |
+|---|---|---|---|
+| **CUDA GPU** | NVIDIA card, 6 GB VRAM, 8 GB RAM | RTX 3060 12 GB class, 16 GB RAM | ~2–5 s (measured on RTX 3060 Laptop) |
+| **Apple Silicon** | M1, 8 GB unified memory | M2/M3/M4, 16 GB | seconds to tens of seconds (community estimates, not measured) |
+| **CPU only** | x86_64, 4 GB RAM (with int8 pre-quantization) | modern multi-core CPU, 16 GB RAM | ~1–2 min (desktop CPU) |
+
+Disk: ~10 GB (torch + pretrained models ~2 GB + ~300 MB per voice).
+
+**Do not deploy CPU inference on small VPS** — a 2-core / 1.6 GB instance will swap-thrash and freeze. Use at least 4 GB RAM, preferably 8 GB.
+
+## Deployment
+
+### 1. Clone (all platforms)
 
 ```bash
-pip install -r requirements.txt
-python -m app.main
+git clone https://github.com/umeiko/umeko-tts-server.git
+cd umeko-tts-server
+git clone --depth 1 https://github.com/RVC-Boss/GPT-SoVITS
 ```
+
+### 2. Python environment (all platforms)
+
+Python **3.10 or 3.11**. [`uv`](https://github.com/astral-sh/uv) recommended:
+
+```bash
+uv venv .venv --python 3.11
+# Linux / macOS:  PY=.venv/bin/python
+# Windows:        PY=.venv/Scripts/python.exe
+uv pip install --python $PY -r requirements.txt
+```
+
+### 3. Install torch (pick your platform)
+
+**NVIDIA GPU (Windows / Linux, CUDA 12.4):**
+
+```bash
+uv pip install --python $PY torch torchaudio \
+  --index-url https://download.pytorch.org/whl/cu124
+```
+
+**Apple Silicon (M1–M4, macOS 12.3+):** PyPI wheels include MPS support, nothing special needed:
+
+```bash
+uv pip install --python $PY torch torchaudio
+```
+
+**CPU only:**
+
+```bash
+uv pip install --python $PY torch torchaudio \
+  --index-url https://download.pytorch.org/whl/cpu
+```
+
+### 4. GPT-SoVITS runtime dependencies
+
+```bash
+uv pip install --python $PY transformers librosa soundfile onnxruntime \
+  langsegment jieba pypinyin cn2an g2p_en fast_langdetect split-lang \
+  wordsegment ToJyutping g2pk2 ko_pron opencc-python-reimplemented \
+  pyopenjtalk-prebuilt sentencepiece rotary_embedding_torch x_transformers \
+  ffmpeg-python pytorch-lightning torchmetrics matplotlib peft
+```
+
+(Authoritative list: `GPT-SoVITS/requirements.txt`. On Linux, also `apt install ffmpeg` for audio tooling.)
+
+English synthesis additionally needs NLTK corpora:
+
+```bash
+$PY -c "import nltk; nltk.download('cmudict'); nltk.download('averaged_perceptron_tagger_eng')"
+# behind a proxy: prefix with NLTK_ALLOW_PROXIED_URLOPEN=1
+```
+
+### 5. Pretrained models
+
+Download into `GPT-SoVITS/GPT_SoVITS/pretrained_models/` (from [huggingface.co/lj1995/GPT-SoVITS](https://huggingface.co/lj1995/GPT-SoVITS), or `hf-mirror.com` in China):
+
+- `chinese-roberta-wwm-ext-large/`
+- `chinese-hubert-base/`
+- `sv/pretrained_eres2netv2w24s4ep4.ckpt`
+- `fast_langdetect/lid.176.bin`
+
+### 6. Voice packs
+
+```bash
+$PY scripts/download_voices.py            # all prebuilt voices
+$PY scripts/download_voices.py mambo      # or specific ones
+# slow GitHub connection? use a mirror: --proxy-prefix https://ghfast.top/
+```
+
+Or add your own voices later through the web console.
+
+### 7. Run
+
+```bash
+# Linux / macOS
+TTS_BACKEND=gsv GSV_DEVICE=auto $PY -m app.main
+
+# Windows PowerShell
+$env:TTS_BACKEND="gsv"; $env:GSV_DEVICE="auto"; & .venv/Scripts/python.exe -m app.main
+```
+
+`GSV_DEVICE=auto` picks CUDA → MPS → CPU automatically. On CPU-only machines with little RAM, pre-quantize the pretrained models first (`$PY scripts/quantize_pretrained.py`) to avoid the fp32 load-then-quantize memory spike.
 
 Open the console: <http://127.0.0.1:9880/console/>
-
-This runs the mock backend (sine-wave test audio) to verify the service and management features.
-
-## Real Synthesis with GPT-SoVITS
-
-```bash
-# 1. Clone the repo (into the project root, or point GSV_ROOT elsewhere)
-git clone --depth 1 https://github.com/RVC-Boss/GPT-SoVITS
-
-# 2. Create a venv (Python 3.10/3.11 recommended; uv works great)
-uv venv .venv --python 3.11
-
-# 3. Install torch — pick ONE:
-#    NVIDIA GPU (CUDA 12.4, e.g. RTX 30/40 series):
-uv pip install --python .venv/Scripts/python.exe torch torchaudio \
-  --index-url https://download.pytorch.org/whl/cu124
-#    CPU only:
-uv pip install --python .venv/Scripts/python.exe torch torchaudio
-
-# 4. Install GPT-SoVITS dependencies plus a few runtime extras:
-#    transformers librosa soundfile onnxruntime langsegment jieba pypinyin
-#    cn2an g2p_en fast_langdetect split-lang wordsegment ToJyutping g2pk2
-#    ko_pron opencc-python-reimplemented pyopenjtalk-prebuilt sentencepiece
-#    rotary_embedding_torch x_transformers ffmpeg-python pytorch-lightning
-#    torchmetrics matplotlib peft
-#    (see GPT-SoVITS/requirements.txt for the authoritative list)
-
-# 5. Download pretrained models into GPT-SoVITS/GPT_SoVITS/pretrained_models/:
-#    - chinese-roberta-wwm-ext-large/
-#    - chinese-hubert-base/
-#    - sv/pretrained_eres2netv2w24s4ep4.ckpt
-#    - fast_langdetect/lid.176.bin
-#    (all available from huggingface.co/lj1995/GPT-SoVITS or hf-mirror.com)
-
-# 6. Start (forces the real backend; fails loudly if anything is missing)
-TTS_BACKEND=gsv python -m app.main   # Linux / macOS
-# Windows cmd:   set TTS_BACKEND=gsv && python -m app.main
-# PowerShell:    $env:TTS_BACKEND="gsv"; python -m app.main
-```
-
-Notes:
-
-- At startup the service chdirs into `GSV_ROOT` so the relative pretrained-model paths in the official `tts_infer.yaml` resolve; all data paths of this service are absolute and unaffected.
-- **Windows**: torchaudio ≥ 2.9 defaults to torchcodec for `load()`, which needs full FFmpeg DLLs. This project monkey-patches `torchaudio.load` with a soundfile implementation (`app/backends/gsv.py`), so no FFmpeg install is required.
-- **Low-memory CPU machines**: `scripts/quantize_pretrained.py` pre-quantizes the BERT/HuBERT pretrained models to int8 sidecar files; on CPU the backend loads them directly, avoiding the fp32 load-then-quantize memory spike.
-
-## Prebuilt Voice Packs
-
-Ready-to-use voices are published as [GitHub Release assets](https://github.com/umeiko/umeko-tts-server/releases/tag/voices-v1.0.0) — one zip per voice (GPT weights + SoVITS weights + reference audio + metadata):
-
-```bash
-python scripts/download_voices.py            # install all prebuilt voices
-python scripts/download_voices.py mambo      # or pick specific ones
-```
-
-The script extracts into `data/voices/<name>/` and merges the voice registry — start the service and the voices are ready. To publish your own packs: `python scripts/pack_voices.py`.
 
 ## Configuration (Environment Variables)
 
@@ -84,11 +126,11 @@ The script extracts into `data/voices/<name>/` and merges the voice registry —
 |------|--------|------|
 | `TTS_HOST` | `0.0.0.0` | Listen address |
 | `TTS_PORT` | `9880` | Listen port |
-| `TTS_BACKEND` | `auto` | `auto` (GSV if available, else mock) / `gsv` (force real) / `mock` (demo) |
+| `TTS_BACKEND` | `auto` | `auto` (use GPT-SoVITS when available) / `gsv` (require it, fail loudly) |
 | `TTS_DATA_DIR` | `./data` | Voice & registry storage directory |
 | `GSV_ROOT` | `./GPT-SoVITS` | GPT-SoVITS repo directory |
 | `GSV_CONFIG` | `<GSV_ROOT>/GPT_SoVITS/configs/tts_infer.yaml` | Inference config |
-| `GSV_DEVICE` | `auto` | `auto` / `cuda` / `cpu` |
+| `GSV_DEVICE` | `auto` | `auto` / `cuda` / `mps` / `cpu` |
 | `GSV_IS_HALF` | `auto` | `auto` (half precision on CUDA) / `true` / `false` |
 | `TTS_WORKERS` | `0` (auto) | Thread pool size; 0 = CPU cores + 4, shrunk by free memory (cap 32) |
 | `TTS_MAX_QUEUE` | `0` (unlimited) | Max queued requests; overflow gets 503 |
@@ -133,7 +175,7 @@ curl -X POST http://127.0.0.1:9880/tts \
 | POST | /api/voices/{name}/default | Set as default voice |
 | GET | /api/voices/{name}/ref-audio | Download / audition reference audio |
 
-A usable voice = GPT weights + SoVITS weights + reference audio (+ reference text/language). You can create a name-only voice first (status "incomplete") and upload files later in the console; the real backend requires all three files.
+A usable voice = GPT weights + SoVITS weights + reference audio (+ reference text/language). You can create a name-only voice first (status "incomplete") and upload files later in the console.
 
 ## Concurrency Model
 
@@ -148,11 +190,11 @@ request → FastAPI event loop → thread pool (loop never blocks)
 
 ## Smoke Test
 
-With the service running (the demo backend passes everything):
+With the service running:
 
 ```bash
-python scripts/smoke_test.py            # default http://127.0.0.1:9880
-python scripts/smoke_test.py http://host:port
+$PY scripts/smoke_test.py            # default http://127.0.0.1:9880
+$PY scripts/smoke_test.py http://host:port
 ```
 
 Covers: status, voice CRUD (incl. Chinese names and file upload), minimal / full / invalid params, error format, 8-way concurrency, max_sec truncation, console page.
@@ -169,8 +211,7 @@ umeko-tts-server/
 │   ├── engine.py          # Thread pool + serial lock + cut_punc split + max_sec truncation
 │   ├── backends/
 │   │   ├── base.py        # Backend interface
-│   │   ├── gsv.py         # Real GPT-SoVITS inference (TTS_infer_pack, hot weight switch)
-│   │   └── mock.py        # Demo backend (zero-dependency sine wave)
+│   │   └── gsv.py         # GPT-SoVITS inference (TTS_infer_pack, hot weight switch)
 │   ├── routes_tts.py      # POST /tts
 │   ├── routes_admin.py    # /api/* admin endpoints
 │   └── static/            # Web console (vanilla HTML/JS/CSS)
@@ -184,9 +225,9 @@ umeko-tts-server/
 └── requirements.txt
 ```
 
-## Deployment Notes
+## Production Notes
 
-- Set `TTS_ADMIN_TOKEN` in production and reverse-proxy with Nginx (raise `client_max_body_size` to fit weight files, ~500 MB per voice)
-- GPT-SoVITS officially recommends Python 3.10; this service's own code runs on 3.10+, and the demo backend works even on 3.14
-- For long texts, use a client timeout of 120s+; `max_sec` effectively prevents runaway CPU inference
-- CPU inference needs real memory: a 2-core / 1.6 GB VPS will swap-thrash and freeze — do not attempt without ≥ 4 GB RAM. GPU inference (CUDA) is strongly recommended and is 10-50x faster
+- Set `TTS_ADMIN_TOKEN` and reverse-proxy with Nginx (raise `client_max_body_size` to ~500 MB to fit weight uploads)
+- For long texts, use a client timeout of 120 s or more; `max_sec` effectively prevents runaway CPU inference
+- On Windows, this project monkey-patches `torchaudio.load` with a soundfile implementation (`app/backends/gsv.py`), so no FFmpeg DLLs are needed for torchaudio ≥ 2.9
+- To publish your own voice packs: `$PY scripts/pack_voices.py`

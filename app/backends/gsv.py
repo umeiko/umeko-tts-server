@@ -78,7 +78,12 @@ class GSVBackend(BaseBackend):
 
             device = self._settings.gsv_device
             if device == "auto":
-                device = "cuda" if torch.cuda.is_available() else "cpu"
+                if torch.cuda.is_available():
+                    device = "cuda"
+                elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+                    device = "mps"
+                else:
+                    device = "cpu"
             is_half = self._settings.gsv_is_half
             if is_half == "auto":
                 is_half = device == "cuda"

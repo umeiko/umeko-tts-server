@@ -11,72 +11,114 @@
 - **权重热切换**：按请求的音色自动切换模型，已加载权重缓存复用，切换零开销
 - **并发支持**：请求进入线程池（按 CPU 核数 + 可用内存自动适配），推理由全局串行锁保护，多请求自动排队、不竞态、事件循环不阻塞
 - **Web 控制台**：音色管理、在线试听、实时队列状态、接口文档，纯静态页面无需构建
-- **演示后端**：未安装 GPT-SoVITS 时自动回退到正弦波演示后端，API / 控制台 / 并发行为可完整自检
+- **预置音色包**：从 GitHub Release 一键安装（`scripts/download_voices.py`）
 
-## 快速开始（演示模式）
+## 硬件需求
+
+| 方案 | 最低配置 | 推荐配置 | 速度参考（短句） |
+|---|---|---|---|
+| **CUDA 显卡** | N 卡 + 6G 显存 + 8G 内存 | RTX 3060 12G 级 + 16G 内存 | 约 2~5 秒（RTX 3060 Laptop 实测） |
+| **苹果 M 芯片** | M1 + 8G 统一内存 | M2/M3/M4 + 16G | 几秒~几十秒（社区经验值，未实测） |
+| **纯 CPU** | x86_64 + 4G 内存（需 int8 预量化） | 现代多核 CPU + 16G 内存 | 约 1~2 分钟（桌面 CPU） |
+
+磁盘：约 10 GB（torch 依赖 + 预训练模型约 2 GB + 每个音色约 300 MB）。
+
+**不要在低配 VPS 上跑 CPU 推理**——2 核 / 1.6G 的实例会 swap 颠簸直至假死，内存至少 4G、建议 8G 以上。
+
+## 部署
+
+### 1. 克隆代码（全平台通用）
 
 ```bash
-pip install -r requirements.txt
-python -m app.main
+git clone https://github.com/umeiko/umeko-tts-server.git
+cd umeko-tts-server
+git clone --depth 1 https://github.com/RVC-Boss/GPT-SoVITS
 ```
+
+### 2. Python 环境（全平台通用）
+
+Python **3.10 或 3.11**，推荐用 [`uv`](https://github.com/astral-sh/uv)：
+
+```bash
+uv venv .venv --python 3.11
+# Linux / macOS:  PY=.venv/bin/python
+# Windows:        PY=.venv/Scripts/python.exe
+uv pip install --python $PY -r requirements.txt
+```
+
+### 3. 安装 torch（按平台选一）
+
+**N 卡（Windows / Linux，CUDA 12.4）：**
+
+```bash
+uv pip install --python $PY torch torchaudio \
+  --index-url https://download.pytorch.org/whl/cu124
+```
+
+**苹果 M 芯片（M1~M4，macOS 12.3+）：** PyPI 官方包自带 MPS 支持，无需特殊源：
+
+```bash
+uv pip install --python $PY torch torchaudio
+```
+
+**纯 CPU：**
+
+```bash
+uv pip install --python $PY torch torchaudio \
+  --index-url https://download.pytorch.org/whl/cpu
+```
+
+### 4. GPT-SoVITS 运行时依赖
+
+```bash
+uv pip install --python $PY transformers librosa soundfile onnxruntime \
+  langsegment jieba pypinyin cn2an g2p_en fast_langdetect split-lang \
+  wordsegment ToJyutping g2pk2 ko_pron opencc-python-reimplemented \
+  pyopenjtalk-prebuilt sentencepiece rotary_embedding_torch x_transformers \
+  ffmpeg-python pytorch-lightning torchmetrics matplotlib peft
+```
+
+（权威清单以 `GPT-SoVITS/requirements.txt` 为准；Linux 另需 `apt install ffmpeg`。）
+
+英文合成还需 NLTK 语料：
+
+```bash
+$PY -c "import nltk; nltk.download('cmudict'); nltk.download('averaged_perceptron_tagger_eng')"
+# 走代理的机器：命令前加 NLTK_ALLOW_PROXIED_URLOPEN=1
+```
+
+### 5. 预训练模型
+
+下载到 `GPT-SoVITS/GPT_SoVITS/pretrained_models/`（来源 [huggingface.co/lj1995/GPT-SoVITS](https://huggingface.co/lj1995/GPT-SoVITS)，国内用 `hf-mirror.com`）：
+
+- `chinese-roberta-wwm-ext-large/`
+- `chinese-hubert-base/`
+- `sv/pretrained_eres2netv2w24s4ep4.ckpt`
+- `fast_langdetect/lid.176.bin`
+
+### 6. 音色包
+
+```bash
+$PY scripts/download_voices.py            # 安装全部预置音色
+$PY scripts/download_voices.py mambo      # 或只装指定的
+# GitHub 直连慢：--proxy-prefix https://ghfast.top/
+```
+
+之后也可以在 Web 控制台里上传自己的音色。
+
+### 7. 启动
+
+```bash
+# Linux / macOS
+TTS_BACKEND=gsv GSV_DEVICE=auto $PY -m app.main
+
+# Windows PowerShell
+$env:TTS_BACKEND="gsv"; $env:GSV_DEVICE="auto"; & .venv/Scripts/python.exe -m app.main
+```
+
+`GSV_DEVICE=auto` 按 CUDA → MPS → CPU 自动选择。低内存纯 CPU 机器建议先跑一次 `$PY scripts/quantize_pretrained.py`（int8 预量化），避免"先读 fp32 再量化"的内存峰值。
 
 打开控制台：<http://127.0.0.1:9880/console/>
-
-此时为演示后端（mock），输出正弦波测试音频，用于验证服务与管理功能。
-
-## 接入 GPT-SoVITS（真实合成）
-
-```bash
-# 1. 克隆仓库（放到项目根目录，或用 GSV_ROOT 指向其他位置）
-git clone --depth 1 https://github.com/RVC-Boss/GPT-SoVITS
-
-# 2. 建虚拟环境（推荐 Python 3.10/3.11，用 uv 最省事）
-uv venv .venv --python 3.11
-
-# 3. 安装 torch —— 二选一：
-#    N 卡（CUDA 12.4，如 RTX 30/40 系）：
-uv pip install --python .venv/Scripts/python.exe torch torchaudio \
-  --index-url https://download.pytorch.org/whl/cu124
-#    纯 CPU：
-uv pip install --python .venv/Scripts/python.exe torch torchaudio
-
-# 4. 安装 GPT-SoVITS 依赖及运行时附加包：
-#    transformers librosa soundfile onnxruntime langsegment jieba pypinyin
-#    cn2an g2p_en fast_langdetect split-lang wordsegment ToJyutping g2pk2
-#    ko_pron opencc-python-reimplemented pyopenjtalk-prebuilt sentencepiece
-#    rotary_embedding_torch x_transformers ffmpeg-python pytorch-lightning
-#    torchmetrics matplotlib peft
-#    （权威清单以 GPT-SoVITS/requirements.txt 为准）
-
-# 5. 下载预训练模型到 GPT-SoVITS/GPT_SoVITS/pretrained_models/：
-#    - chinese-roberta-wwm-ext-large/
-#    - chinese-hubert-base/
-#    - sv/pretrained_eres2netv2w24s4ep4.ckpt
-#    - fast_langdetect/lid.176.bin
-#    （均可从 huggingface.co/lj1995/GPT-SoVITS 或 hf-mirror.com 获取）
-
-# 6. 启动（强制真实后端，失败即报错）
-TTS_BACKEND=gsv python -m app.main   # Linux / macOS
-# Windows cmd:   set TTS_BACKEND=gsv && python -m app.main
-# PowerShell:    $env:TTS_BACKEND="gsv"; python -m app.main
-```
-
-说明：
-
-- 服务启动时会将工作目录切换到 `GSV_ROOT`，以兼容官方 `tts_infer.yaml` 中预训练模型的相对路径；本服务的所有数据路径均为绝对路径，不受影响。
-- **Windows**：torchaudio ≥ 2.9 的 `load()` 默认走 torchcodec，需要完整版 FFmpeg DLL。本项目在 `app/backends/gsv.py` 中把 `torchaudio.load` 补丁为 soundfile 实现，无需安装 FFmpeg。
-- **低内存 CPU 机器**：`scripts/quantize_pretrained.py` 可将 BERT/HuBERT 预训练模型离线量化为 int8 旁挂文件；CPU 模式下后端直接加载量化文件，避免"先读 fp32 再量化"的内存峰值。
-
-## 预置音色包
-
-开箱即用的音色以 [GitHub Release 资源](https://github.com/umeiko/umeko-tts-server/releases/tag/voices-v1.0.0) 形式发布——每个 zip 含一个音色的 GPT 权重 + SoVITS 权重 + 参考音 + 元数据：
-
-```bash
-python scripts/download_voices.py            # 安装全部预置音色
-python scripts/download_voices.py mambo      # 或只装指定的
-```
-
-脚本会解压到 `data/voices/<音色名>/` 并合并音色注册表，启动服务即可使用。发布自己的音色包：`python scripts/pack_voices.py`。
 
 ## 配置项（环境变量）
 
@@ -84,11 +126,11 @@ python scripts/download_voices.py mambo      # 或只装指定的
 |------|--------|------|
 | `TTS_HOST` | `0.0.0.0` | 监听地址 |
 | `TTS_PORT` | `9880` | 监听端口 |
-| `TTS_BACKEND` | `auto` | `auto`（有 GSV 用 GSV，否则 mock）/ `gsv`（强制真实后端）/ `mock`（演示） |
+| `TTS_BACKEND` | `auto` | `auto`（有 GPT-SoVITS 就用）/ `gsv`（强制，缺失即报错） |
 | `TTS_DATA_DIR` | `./data` | 音色与注册表存储目录 |
 | `GSV_ROOT` | `./GPT-SoVITS` | GPT-SoVITS 仓库目录 |
 | `GSV_CONFIG` | `<GSV_ROOT>/GPT_SoVITS/configs/tts_infer.yaml` | 推理配置 |
-| `GSV_DEVICE` | `auto` | `auto` / `cuda` / `cpu` |
+| `GSV_DEVICE` | `auto` | `auto` / `cuda` / `mps` / `cpu` |
 | `GSV_IS_HALF` | `auto` | `auto`（CUDA 下半精度）/ `true` / `false` |
 | `TTS_WORKERS` | `0`（自动） | 线程池大小，0 = CPU 核数+4 并按可用内存收缩（上限 32） |
 | `TTS_MAX_QUEUE` | `0`（不限） | 最大排队请求数，超出返回 503 |
@@ -133,7 +175,7 @@ curl -X POST http://127.0.0.1:9880/tts \
 | POST | /api/voices/{name}/default | 设为默认音色 |
 | GET | /api/voices/{name}/ref-audio | 下载 / 试听参考音频 |
 
-一个可用音色 = GPT 权重 + SoVITS 权重 + 参考音频（+ 参考文本/语种）。可以先只填名称创建（状态「待完善」），后续在控制台补齐文件；真实后端要求三项文件齐全。
+一个可用音色 = GPT 权重 + SoVITS 权重 + 参考音频（+ 参考文本/语种）。可以先只填名称创建（状态「待完善」），后续在控制台补齐文件。
 
 ## 并发模型
 
@@ -148,11 +190,11 @@ curl -X POST http://127.0.0.1:9880/tts \
 
 ## 冒烟测试
 
-服务运行中执行（演示后端即可全量通过）：
+服务运行中执行：
 
 ```bash
-python scripts/smoke_test.py            # 默认 http://127.0.0.1:9880
-python scripts/smoke_test.py http://host:port
+$PY scripts/smoke_test.py            # 默认 http://127.0.0.1:9880
+$PY scripts/smoke_test.py http://host:port
 ```
 
 覆盖：状态、音色 CRUD（含中文名与文件上传）、最小 / 完整 / 非法参数、错误格式、8 路并发、max_sec 截断、控制台页面。
@@ -169,8 +211,7 @@ umeko-tts-server/
 │   ├── engine.py          # 线程池 + 串行锁 + cut_punc 切分 + max_sec 截断
 │   ├── backends/
 │   │   ├── base.py        # 后端接口
-│   │   ├── gsv.py         # GPT-SoVITS 真实推理（TTS_infer_pack，权重热切换）
-│   │   └── mock.py        # 演示后端（零依赖正弦波）
+│   │   └── gsv.py         # GPT-SoVITS 推理（TTS_infer_pack，权重热切换）
 │   ├── routes_tts.py      # POST /tts
 │   ├── routes_admin.py    # /api/* 管理接口
 │   └── static/            # Web 控制台（原生 HTML/JS/CSS）
@@ -184,9 +225,9 @@ umeko-tts-server/
 └── requirements.txt
 ```
 
-## 部署提示
+## 生产部署提示
 
-- 生产环境建议设置 `TTS_ADMIN_TOKEN`，并用 Nginx 反代（注意调大 `client_max_body_size` 以容纳权重文件，单音色约 500MB）
-- GPT-SoVITS 官方推荐 Python 3.10；本服务自身代码兼容 3.10+，演示后端在更高版本（含 3.14）可直接运行
+- 建议设置 `TTS_ADMIN_TOKEN`，并用 Nginx 反代（`client_max_body_size` 调到 500MB 左右以容纳权重上传）
 - 长文本建议客户端设置 120 秒以上超时；`max_sec` 可有效防止 CPU 推理失控
-- CPU 推理对内存要求不低：2 核 / 1.6G 的 VPS 会 swap 颠簸直至假死，**未升配到 ≥4G 内存前请勿尝试**；强烈建议使用 CUDA GPU 推理，速度比 CPU 快 10~50 倍
+- Windows 上本项目把 `torchaudio.load` 补丁为 soundfile 实现（`app/backends/gsv.py`），torchaudio ≥ 2.9 无需安装 FFmpeg DLL
+- 发布自己的音色包：`$PY scripts/pack_voices.py`
