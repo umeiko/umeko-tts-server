@@ -106,6 +106,34 @@ $PY scripts/download_voices.py mambo      # 或只装指定的
 
 之后也可以在 Web 控制台里上传自己的音色。
 
+### 正式中文旁白音色
+
+| 资源文件 | API 音色名称 | 参考音色 |
+|---|---|---|
+| `narrator_male.zip` | `播音男声` | Kokoro 1.1 中文 `zm_010` |
+| `narrator_female.zip` | `播音女声` | Kokoro 1.1 中文 `zf_001` |
+
+```bash
+$PY scripts/download_voices.py narrator_male narrator_female
+# 也可以安装已下载的文件，无需访问 GitHub：
+$PY scripts/download_voices.py --file narrator_male.zip --file narrator_female.zip
+```
+
+两者是**零样本旁白音色预设，不是分别微调的播音员专属检查点**。
+包内共享同一对官方 GPT-SoVITS v2ProPlus 基座权重（MIT）；音色与语气由
+[Kokoro-82M-v1.1-zh](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh)
+（Apache-2.0）合成的不同参考音频决定。其模型卡说明，中文训练语料由龙猫数据授权提供。
+包内没有截取新闻节目或名人录音。
+
+每包包含参考文本与音频、记录固定版本和 SHA256 的 `PROVENANCE.json`、许可与模型卡，
+以及通过本项目 API 生成的 `preview.wav`。安装时会验证包内提供的哈希并保留来源文件，
+保留现有默认音色；安装后需重启已运行的服务。推理仍使用现有 GPT-SoVITS 后端，无需安装 Kokoro。
+
+维护者可用 `scripts/prepare_narrators.py` 重新生成参考音频
+（仅制作时需要 `kokoro==0.9.4`、`misaki[zh]==0.9.4`），再运行
+`scripts/pack_voices.py 播音男声 播音女声` 打包。制作脚本拒绝覆盖已有音色目录，
+可用 `--data-dir` 指定独立制作目录。
+
 ### 7. 启动
 
 ```bash

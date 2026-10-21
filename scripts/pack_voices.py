@@ -19,6 +19,8 @@ ASSET_NAMES = {
     "曼波": "mambo",
     "高松灯": "takamatsu_tomori",
     "爱音": "chihaya_anon",
+    "播音男声": "narrator_male",
+    "播音女声": "narrator_female",
 }
 
 
@@ -45,10 +47,22 @@ def main():
             "ref_lang": info.get("ref_lang", "zh"),
             "is_default": registry.get("default") == name,
         }
+        provenance = voice_dir / "PROVENANCE.json"
+        if provenance.is_file():
+            source = json.loads(provenance.read_text(encoding="utf-8"))
+            meta["model_version"] = source.get("model_version", "")
+            meta["voice_type"] = source.get("voice_type", "")
         out = OUT / f"{slug}.zip"
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
             for f in files:
                 z.write(voice_dir / f, f)
+            for optional in ("README.md", "PROVENANCE.json", "preview.wav"):
+                path = voice_dir / optional
+                if path.is_file():
+                    z.write(path, optional)
+            for path in sorted((voice_dir / "LICENSES").glob("*")):
+                if path.is_file():
+                    z.write(path, "LICENSES/" + path.name)
             z.writestr("voice.json", json.dumps(meta, ensure_ascii=False, indent=2))
         print(f"[ok] {name} -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
 

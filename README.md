@@ -106,6 +106,37 @@ $PY scripts/download_voices.py mambo      # or specific ones
 
 Or add your own voices later through the web console.
 
+### Mandarin narrator presets
+
+| Asset | API voice name | Reference voice |
+|---|---|---|
+| `narrator_male.zip` | `播音男声` | Kokoro 1.1 Chinese `zm_010` |
+| `narrator_female.zip` | `播音女声` | Kokoro 1.1 Chinese `zf_001` |
+
+```bash
+$PY scripts/download_voices.py narrator_male narrator_female
+# Or install downloaded assets without accessing GitHub:
+$PY scripts/download_voices.py --file narrator_male.zip --file narrator_female.zip
+```
+
+These are **zero-shot narration presets, not separately fine-tuned announcer checkpoints**.
+Both contain the same official GPT-SoVITS v2ProPlus base weights (MIT); different
+synthetic references from [Kokoro-82M-v1.1-zh](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh)
+(Apache-2.0) condition their timbre and delivery. Its model card describes Chinese
+training data permissively granted by LongMaoData. No news-program or celebrity
+recordings are included.
+
+Each pack includes reference text/audio, pinned revisions and SHA256 hashes in
+`PROVENANCE.json`, licenses/model cards, and an API-generated `preview.wav`.
+The installer verifies supplied hashes and preserves attribution. Existing
+default-voice selection is preserved. Restart a running server after installing.
+Serving these packs uses the existing GPT-SoVITS backend and needs no Kokoro dependency.
+
+Maintainers can rebuild the references with `scripts/prepare_narrators.py`
+(optional development dependencies: `kokoro==0.9.4`, `misaki[zh]==0.9.4`), then run
+`scripts/pack_voices.py 播音男声 播音女声`. Reference creation refuses to overwrite
+existing voice directories; use `--data-dir` for an isolated build directory.
+
 ### 7. Run
 
 ```bash

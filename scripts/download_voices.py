@@ -12,7 +12,9 @@
 纯标准库实现，无需安装额外依赖。
 """
 import argparse
+import hashlib
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -49,9 +51,9 @@ def download(url: str, dest: Path, total: int) -> None:
                 next_mark += 0.1
 
 
-def merge_registry(meta: dict) -> None:
-    DATA.mkdir(parents=True, exist_ok=True)
-    reg_path = DATA / "voices.json"
+def merge_registry(meta: dict, data_dir: Path = DATA) -> None:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    reg_path = data_dir / "voices.json"
     if reg_path.is_file():
         registry = json.loads(reg_path.read_text(encoding="utf-8"))
     else:
@@ -76,14 +78,65 @@ def merge_registry(meta: dict) -> None:
     reg_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def install_pack(zpath: Path, data_dir: Path = DATA) -> dict:
+    """Install the original format and provenance-bearing packs, preserving attribution."""
+    with zipfile.ZipFile(zpath) as z:
+        meta = json.loads(z.read("voice.json").decode("utf-8"))
+        name = meta["name"]
+        if not isinstance(name, str) or not re.fullmatch(r"[\w\-一-鿿]{1,64}", name):
+            raise ValueError("Invalid voice name in archive")
+        required = ("gpt_weights.ckpt", "sovits_weights.pth", "ref_audio.wav")
+        for member in required:
+            if z.getinfo(member).file_size == 0:
+                raise ValueError(f"Empty voice file: {member}")
+        expected = {}
+        if "PROVENANCE.json" in z.namelist():
+            expected = json.loads(z.read("PROVENANCE.json").decode("utf-8")).get("sha256", {})
+        optional = [n for n in z.namelist() if n in ("README.md", "PROVENANCE.json", "preview.wav")
+                    or (n.startswith("LICENSES/") and len(n.split("/")) == 2
+                        and n.split("/")[1] not in ("", ".", "..") and "\\" not in n)]
+        data_dir.mkdir(parents=True, exist_ok=True)
+        # Verify every file before replacing any installed voice files.
+        with tempfile.TemporaryDirectory(prefix=".voice-install-", dir=data_dir) as td:
+            stage = Path(td)
+            for member in [*required, *optional]:
+                target = stage / member
+                target.parent.mkdir(parents=True, exist_ok=True)
+                digest = hashlib.sha256()
+                with z.open(member) as src, target.open("wb") as dst:
+                    for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                        dst.write(chunk)
+                if member in expected and digest.hexdigest() != expected[member]:
+                    raise ValueError(f"SHA256 mismatch: {member}")
+            voice_dir = data_dir / "voices" / name
+            voice_dir.mkdir(parents=True, exist_ok=True)
+            for member in [*required, *optional]:
+                dest = voice_dir / member
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(stage / member, dest)
+        merge_registry(meta, data_dir)
+    return meta
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="下载预置音色权重包")
     ap.add_argument("assets", nargs="*", help="只下载指定资源名（如 mambo），默认全部")
     ap.add_argument("--tag", default=DEFAULT_TAG, help=f"release tag，默认 {DEFAULT_TAG}")
     ap.add_argument("--repo", default=REPO, help=f"GitHub 仓库，默认 {REPO}")
+    ap.add_argument("--file", type=Path, action="append", default=[], help="安装本地音色 zip，可重复传入")
+    ap.add_argument("--data-dir", type=Path, default=DATA, help="音色与注册表保存目录")
     ap.add_argument("--proxy-prefix", default="",
                     help="下载加速镜像前缀（如 https://ghfast.top/），拼在下载地址前")
     args = ap.parse_args()
+
+    if args.file:
+        if args.assets:
+            ap.error("--file cannot be combined with remote asset names")
+        for zpath in args.file:
+            meta = install_pack(zpath, args.data_dir)
+            print(f"[完成] {meta['name']} -> {args.data_dir / 'voices' / meta['name']}")
+        return
 
     rel = http_json(f"https://api.github.com/repos/{args.repo}/releases/tags/{args.tag}")
     assets = [a for a in rel["assets"] if a["name"].endswith(".zip")]
@@ -99,14 +152,8 @@ def main() -> None:
         with tempfile.TemporaryDirectory() as td:
             zpath = Path(td) / a["name"]
             download(args.proxy_prefix + a["browser_download_url"], zpath, a["size"])
-            with zipfile.ZipFile(zpath) as z:
-                meta = json.loads(z.read("voice.json").decode("utf-8"))
-                voice_dir = DATA / "voices" / meta["name"]
-                voice_dir.mkdir(parents=True, exist_ok=True)
-                for member in ("gpt_weights.ckpt", "sovits_weights.pth", "ref_audio.wav"):
-                    with z.open(member) as src, open(voice_dir / member, "wb") as dst:
-                        shutil.copyfileobj(src, dst, length=1024 * 1024)
-        merge_registry(meta)
+            meta = install_pack(zpath, args.data_dir)
+            voice_dir = args.data_dir / "voices" / meta["name"]
         print(f"[完成] {meta['name']} -> {voice_dir}")
 
     print("\n全部完成，启动服务即可使用。")
