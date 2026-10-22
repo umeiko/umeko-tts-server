@@ -1,0 +1,160 @@
+# 可信用户服务与 ALB 部署
+
+## 升级与首次登录
+
+v2 保留 `/tts` 的请求体与 WAV 响应，但不再开放匿名合成或匿名管理。
+先备份 `data/`，更新依赖，设置至少 24 字符的随机 `TTS_ADMIN_TOKEN`，再启动。
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+# 将生成的值保存到部署系统的密钥配置中，不要提交到仓库。
+export TTS_ADMIN_TOKEN='<生成的值>'
+export TTS_BACKEND=gsv
+export UMEKO_TTS_BASE_URL='https://tts.example.com/services/umeko/tts'
+python -m app.main
+```
+
+PowerShell 对应写法为 `$env:TTS_ADMIN_TOKEN='…'` 与 `$env:UMEKO_TTS_BASE_URL='…'`。
+`.env.example` 是配置清单；应用读取进程环境，不会自动加载 `.env` 文件。
+
+打开 `https://tts.example.com/services/umeko/tts/console/`，使用管理员令牌登录。
+在“用户与密钥”创建用户，设置优先级、并发、排队、频率和字符额度，再发放 API Key。
+完整 Key 只返回一次；管理员列表仅显示前缀。丢失时轮换或重新发放，不支持找回。
+
+管理员登录使用 HttpOnly、SameSite=Strict 会话 Cookie 和写操作 CSRF 校验。
+HTTPS 外部地址会启用 Secure Cookie。浏览器不保存管理员令牌或完整 API Key 到 localStorage。
+管理员自动化仍可使用 `X-Admin-Token`；普通调用者使用 `Authorization: Bearer <API_KEY>` 或 `X-API-Key`。
+API Key 不能访问管理接口，不能读取或取消其他用户的任务。多把 Key 共享所属用户的额度。
+
+修改 `TTS_ADMIN_TOKEN` 并重启会使旧管理员会话失效；用户 API Key 保持有效，除非主动撤销或过期。
+未设置管理员令牌时，管理接口返回 503；匿名合成始终返回 401。模型缺失不会自动输出演示音。
+`TTS_BACKEND=mock` 仅供明确选择的本地测试。
+
+## 外部 URL、转发路径与前缀
+
+`UMEKO_TTS_BASE_URL` 是唯一的外部地址配置：
+
+| 配置 | 外部控制台 | 外部合成接口 |
+|---|---|---|
+| 空或 `/` | `/console/` | `/tts` |
+| `/services/voice` | `/services/voice/console/` | `/services/voice/tts` |
+| `https://tts.example.com/services/voice/` | 同上，并固定公开 origin | 同上 |
+
+完整 URL 推荐用于 HTTPS/ALB 部署；末尾斜线会被归一化。
+不接受含账号密码、查询参数、fragment、重复斜线或 `..` 的配置。
+应用不会根据任意客户端的 `X-Forwarded-Prefix` 改变地址，也不需要重复传入 Uvicorn `--root-path`。
+
+以 `/services/umeko/tts` 为例：
+
+| 链路 | 浏览器请求 | ALB/NGINX 转发给 9880 | 应用路由 |
+|---|---|---|---|
+| 保留前缀 | `/services/umeko/tts/api/users` | `/services/umeko/tts/api/users` | `/api/users` |
+| 裁去前缀 | `/services/umeko/tts/api/users` | `/api/users` | `/api/users` |
+
+应用同时接受这两种上游路径，并将 ASGI `root_path` 统一为配置前缀。
+HTML 中的 JS/CSS、页面中的所有请求、重定向、任务返回地址与 Cookie Path 均使用同一前缀，且只添加一次。
+源站的无前缀路由兼容代理裁剪；它们具有同样的鉴权要求。请通过安全组/防火墙限制源站仅接受可信代理访问。
+不要让 ALB 把此服务的内部无前缀路由匹配到其他公开服务。
+
+不同云厂商的 ALB 转发规则和重写能力不同，应检查实际规则。
+[AWS ALB 支持可选 URL rewrite transform](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/rule-transforms.html)；没有匹配到重写规则时保留原请求。
+这份实现兼容保留或裁剪，不要求为本服务额外引入重写。
+[FastAPI 的代理说明](https://fastapi.tiangolo.com/advanced/behind-a-proxy/)解释了外部路径与 ASGI root_path 的关系。
+
+### NGINX 示例
+
+以下规则保留路径；若 `proxy_pass` 改为 `http://127.0.0.1:9880/`，则裁去 location 前缀，两种方式均可。
+`location` 和公开地址必须一致，包含末尾斜线。
+
+```nginx
+location = /services/umeko/tts {
+    return 308 /services/umeko/tts/;
+}
+location /services/umeko/tts/ {
+    proxy_pass http://127.0.0.1:9880;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    client_max_body_size 512m;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_read_timeout 300s;
+}
+```
+
+如果 NGINX 位于 HTTPS ALB 后面，`$scheme` 可能为内部 HTTP。
+应在仅可信 ALB 能访问的入口上正确传递其外部 scheme，或配置完整的 HTTPS `UMEKO_TTS_BASE_URL` 固定公开 origin。
+不要无条件信任公网客户端伪造的代理头。
+内置 `python -m app.main` 入口通过 `TTS_FORWARDED_ALLOW_IPS` 指定可信代理 IP/CIDR，默认只有 127.0.0.1。
+自定义 Uvicorn 启动命令应设置对应的 `--proxy-headers --forwarded-allow-ips`，避免无条件使用 `*`。
+
+## 长任务与空闲超时
+
+多人排队或 CPU 推理可超过一个 HTTP 连接的空闲超时。
+例如 [AWS ALB 默认 idle timeout 为 60 秒](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-load-balancer-attributes.html#connection-idle-timeout)，其他厂商应查看其实际配置。
+首选异步接口，浏览器面板也使用它：
+
+```bash
+BASE='https://tts.example.com/services/umeko/tts'
+# UMEKO_TTS_API_KEY 由管理员发放，设置到客户端环境中。
+curl -X POST "$BASE/v1/jobs" \
+  -H "Authorization: Bearer $UMEKO_TTS_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"你好，欢迎使用语音合成服务。","max_sec":10}'
+
+# 保存返回的 id，每 1–3 秒查询；每次均携带同一用户的有效密钥。
+curl "$BASE/v1/jobs/<id>" -H "Authorization: Bearer $UMEKO_TTS_API_KEY"
+curl "$BASE/v1/jobs/<id>/audio" \
+  -H "Authorization: Bearer $UMEKO_TTS_API_KEY" -o output.wav
+curl -X DELETE "$BASE/v1/jobs/<id>" -H "Authorization: Bearer $UMEKO_TTS_API_KEY"
+```
+
+创建返回 202、`Location`、`status_url`；完成后状态为 `completed`，返回 `audio_url`。
+状态还包括 `queued`、`running`、`cancelling`、`cancelled`、`failed`、`expired`。
+队列位置是当前优先级排序位置；实际开始时间还受每用户并发限制。
+结果保存在内存，默认保留 600 秒，总预算 64 MiB；预算满时按最旧结果淘汰，客户端应及时下载。
+重启会中断未完成任务并释放其预留额度，旧任务地址不再有效。已完成调用的用量和审计记录仍保留在 SQLite。
+
+`POST /tts` 仍同步返回 WAV，适用于短请求。其连接超时应覆盖排队和推理时间；异步接口通常更合适。
+429 表示用户频率、额度或排队上限；排队数量/频率限制包含 `Retry-After`。
+503 表示服务未就绪、正在停止或排队超时。400/401/403/404 分别表示输入、凭证、权限/CSRF、资源问题。
+
+## 调度与资源边界
+
+- 全局并行数与每用户并行数分别限制，同时满足才分配推理名额。
+- GPT-SoVITS 共享一份会切换权重的管线，安全容量为 1；面板拒绝超过当前后端容量的配置。线程数不是可并行模型副本数。
+- 用户优先级为 0–10，大者优先；同级 FIFO。每等待 `aging_seconds` 秒提升 1 级，避免低优先级持续饥饿。
+- 管理员可在线修改全局并发、等待上限、排队超时与提升间隔。首次启动取环境变量，后续取数据库已保存值。降低并发不会强杀已运行的推理。
+- 请求被接受时预留输入字符额度，成功时结算；失败、排队超时、取消释放预留。已接受请求仍计入每分钟限额，防止反复取消绕过限流。每日额度按 UTC 日界线计算。
+- 撤销/轮换密钥、停用用户会取消其未完成任务。排队任务立即释放额度；运行任务标记 `cancelling`，实际模型调用结束后才释放占用。
+- Python 线程不能被安全强杀。`max_sec` 限制输出长度，不能保证在此秒数内中断模型；文本上限、请求频率和有界队列共同约束资源。
+- 活跃音色禁止替换或删除；上传先写临时文件再替换，失败不先删除旧权重。仅管理员可上传，模型文件必须来自可信来源。
+
+### 单实例约束
+
+此版本是一个 SQLite 控制平面和一个内存调度器，**运行一个应用实例、一个 ASGI worker、一个 ALB target**。
+同一数据目录有操作系统文件锁，误启第二个调度进程会失败；`WEB_CONCURRENCY>1` 会被拒绝。
+多个独立数据目录或多台主机不会共享用户、额度或队列，不能把这些实例直接挂到同一用户服务上来宣称全局限流。
+多模型副本需要后续引入共享调度/持久任务存储。当前不使用 sticky routing 来掩盖这个限制。
+
+## 数据、运维与验收
+
+- 用户、Key 摘要、会话摘要、调用计数、额度和调度配置保存在 `TTS_DATA_DIR/access.sqlite3`；Unix 数据库权限为 0600。
+- 密钥原文只存在于创建响应；不要把它放入 URL、工单、截图或日志。通过环境变量给客户端传递。
+- 调用历史保存 30 天，只主动记录任务号、用户、密钥 ID、字符数和状态，不保存输入正文或输出音频。管理员操作审计最多保留 2000 条。
+- 上游模型库可能自行打印推理内容，部署者应控制进程日志的访问与保留策略。
+- 停止服务后可备份整个数据目录。运行中备份 SQLite 请使用 SQLite backup API，不能只复制 `.sqlite3` 而遗漏 WAL。
+- `/healthz` 供源站健康检查使用，不要求登录，不返回密钥、用户或本机路径。ALB 可配置内部 `/healthz` 或带公开前缀的路径。
+- 调度器或状态数据库异常时，健康检查返回 503 并拒绝新任务；修复存储后重启可恢复遗留的字符预留。
+- 通过 ALB 实际访问控制台，检查 JS/CSS、用户创建与刷新、发放/轮换/撤销密钥、异步合成、跨用户任务拒绝、注销后读写拒绝和 Cookie Path。
+- 本地 TestClient/HTTP 代理或 CI 通过，不等同于已经验证某个线上 ALB 的监听规则、证书、安全组和超时配置。
+
+隔离测试（无需下载模型）：
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest tests -q
+```
+
+测试使用临时数据目录与受控测试后端；不会删除运行中服务的音色。

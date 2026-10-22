@@ -2,7 +2,7 @@
 
 - 权重热切换：缓存当前已加载的 (GPT, SoVITS) 权重，音色变化时才调用
   init_t2s_weights / init_vits_weights，避免每个请求重复加载。
-- 线程安全由引擎层的全局串行锁保证，本类不做额外加锁。
+- 调度器将此共享管线的推理容量限制为 1，权重切换不会与其他推理交错。
 - 重依赖（torch / numpy / GPT_SoVITS）全部延迟导入，未安装时给出中文指引。
 """
 from __future__ import annotations
@@ -155,6 +155,9 @@ class GSVBackend(BaseBackend):
         wrap(HubertModel)
 
     # ---------- 推理 ----------
+
+    def invalidate_cache(self) -> None:
+        self._loaded = None
 
     def _ensure_weights(self, job: SynthesisJob):
         key = (os.path.abspath(job.gpt_weights), os.path.abspath(job.sovits_weights))

@@ -1,120 +1,185 @@
-"""应用入口：装配配置、注册表、后端、引擎、路由与静态控制台。"""
+"""Application factory; model initialization and scheduler ownership follow lifespan."""
+
 from __future__ import annotations
 
+import asyncio
+import html
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .backends import BackendError, GSVBackend, MockBackend
+from .access import AccessStore
+from .backends import GSVBackend, MockBackend
 from .config import Settings
 from .engine import TTSEngine
 from .errors import ApiError
+from .process_lock import ProcessLock
 from .registry import VoiceRegistry
+from .routes_access import router as access_router
 from .routes_admin import router as admin_router
 from .routes_tts import router as tts_router
+from .security import PrefixMiddleware, SecurityMiddleware, verify_admin
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("umeko-tts")
 
 
-def select_backend(settings: Settings):
-    """auto: 优先 GPT-SoVITS，不可用时回退演示后端并在日志中明示。"""
-    if settings.backend == "mock":
-        logger.info("后端: mock（演示模式，输出正弦波测试音频）")
-        return MockBackend()
-    if settings.backend == "gsv":
-        backend = GSVBackend(settings)
-        backend.startup()  # 强制模式：失败直接抛错，不静默回退
-        logger.info("后端: GPT-SoVITS 初始化完成")
-        return backend
-    try:
-        backend = GSVBackend(settings)
-        backend.startup()
-        logger.info("后端: GPT-SoVITS 初始化完成（auto 模式）")
-        return backend
-    except BackendError as e:
-        logger.warning("GPT-SoVITS 不可用，回退到演示后端: %s", e)
-        return MockBackend()
-
-
-def create_app() -> FastAPI:
-    settings = Settings.from_env()
+def create_app(settings: Settings | None = None, backend=None) -> FastAPI:
+    settings = (settings or Settings.from_env()).validate()
     registry = VoiceRegistry(settings.data_dir)
-    backend = select_backend(settings)
-    engine = TTSEngine(
-        backend=backend,
-        registry=registry,
-        max_workers=settings.resolved_workers(),
-        max_queue=settings.max_queue,
-    )
-    logger.info("线程池大小: %d，最大排队: %s", engine.max_workers, settings.max_queue or "不限")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
-        app.state.engine.shutdown()
-        app.state.engine.backend.shutdown()
+        lock = ProcessLock(settings.data_dir)
+        lock.acquire()
+        store, engine, selected = None, None, backend
+        try:
+            store = AccessStore(settings.data_dir)
+            store.recover()
+            app.state.access = store
+            selected = selected or (
+                MockBackend() if settings.backend == "mock" else GSVBackend(settings)
+            )
+            await run_in_threadpool(selected.startup)
+            engine = TTSEngine(
+                selected, registry, settings.resolved_workers(), store, settings
+            )
+            app.state.engine = engine
+            app.state.voice_lock = asyncio.Lock()
+            engine.start()
+            logger.info(
+                "TTS ready: backend=%s concurrency=%d capacity=%d prefix=%s",
+                selected.name,
+                engine.config["concurrency"],
+                engine.capacity,
+                settings.base_path or "/",
+            )
+            yield
+        finally:
+            try:
+                if engine:
+                    await engine.shutdown()
+                if selected:
+                    await run_in_threadpool(selected.shutdown)
+            finally:
+                if store:
+                    store.close()
+                lock.release()
 
-    app = FastAPI(title="Umeko TTS Server", version="1.0.0", lifespan=lifespan)
-    app.state.settings = settings
-    app.state.registry = registry
-    app.state.engine = engine
-
-    origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins or ["*"],
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
+    app = FastAPI(
+        title="Umeko TTS Server",
+        version="2.0.0",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        redirect_slashes=False,
+        servers=[{"url": settings.base_url or "/"}],
     )
+    app.state.settings, app.state.registry = settings, registry
 
     @app.exception_handler(ApiError)
-    async def _api_error(request: Request, exc: ApiError):
-        return JSONResponse({"message": exc.message}, status_code=exc.status_code)
+    async def api_error(request, exc):
+        return JSONResponse(
+            {"message": exc.message}, exc.status_code, headers=exc.headers
+        )
 
     @app.exception_handler(StarletteHTTPException)
-    async def _http_error(request: Request, exc: StarletteHTTPException):
-        # 统一错误格式为 {"message": ...}（覆盖 404、JSON 解析失败等框架级错误）
-        detail = exc.detail
-        if detail == "There was an error parsing the body":
-            detail = "请求体不是合法的 JSON"
-        return JSONResponse({"message": str(detail)}, status_code=exc.status_code)
+    async def http_error(request, exc):
+        return JSONResponse(
+            {"message": str(exc.detail)}, exc.status_code, headers=exc.headers
+        )
 
     @app.exception_handler(RequestValidationError)
-    async def _validation_error(request: Request, exc: RequestValidationError):
-        parts = []
-        for err in exc.errors():
-            loc = ".".join(str(x) for x in err.get("loc", []) if x != "body")
-            msg = err.get("msg", "")
-            parts.append(f"{loc}: {msg}" if loc else msg)
-        return JSONResponse({"message": "请求参数错误: " + "; ".join(parts)}, status_code=400)
+    async def validation_error(request, exc):
+        parts = [
+            ".".join(str(x) for x in e["loc"] if x != "body") + ": " + e["msg"]
+            for e in exc.errors()
+        ]
+        return JSONResponse({"message": "请求参数错误: " + "; ".join(parts)}, 400)
 
     @app.exception_handler(Exception)
-    async def _unhandled(request: Request, exc: Exception):
-        logger.exception("未处理异常: %s %s", request.method, request.url.path)
-        return JSONResponse({"message": f"服务器内部错误: {exc}"}, status_code=500)
+    async def unhandled(request, exc):
+        logger.exception("Unhandled error: %s %s", request.method, request.url.path)
+        return JSONResponse(
+            {"message": "服务器内部错误，请联系管理员"},
+            500,
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
 
     app.include_router(tts_router)
+    app.include_router(access_router)
     app.include_router(admin_router)
+    static = Path(__file__).parent / "static"
 
-    static_dir = Path(__file__).parent / "static"
-    app.mount("/console", StaticFiles(directory=static_dir, html=True), name="console")
+    @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+    @app.api_route("/console/", methods=["GET", "HEAD"], include_in_schema=False)
+    async def console():
+        page = (static / "index.html").read_text(encoding="utf-8")
+        page = page.replace(
+            "__BASE_PATH__", html.escape(settings.base_path, quote=True)
+        )
+        page = page.replace("__BASE_URL__", html.escape(settings.base_url, quote=True))
+        return HTMLResponse(page)
 
-    @app.get("/")
-    async def index():
-        return RedirectResponse("/console/")
+    @app.get("/console", include_in_schema=False)
+    async def console_redirect():
+        return RedirectResponse(settings.base_path + "/console/")
 
+    @app.get("/console/app.js", include_in_schema=False)
+    async def script():
+        return FileResponse(static / "app.js", media_type="text/javascript")
+
+    @app.get("/console/style.css", include_in_schema=False)
+    async def stylesheet():
+        return FileResponse(static / "style.css", media_type="text/css")
+
+    @app.get("/healthz", include_in_schema=False)
+    async def health():
+        engine = app.state.engine
+        if engine._closed or (engine._dispatcher and engine._dispatcher.done()):
+            return JSONResponse({"status": "unavailable"}, 503)
+        return {"status": "ok"}
+
+    @app.get(
+        "/api/openapi", dependencies=[Depends(verify_admin)], include_in_schema=False
+    )
+    async def schema():
+        result = app.openapi()
+        result.setdefault("components", {}).setdefault("securitySchemes", {})[
+            "ApiKey"
+        ] = {
+            "type": "http",
+            "scheme": "bearer",
+            "description": "Administrator-issued API key",
+        }
+        for path, methods in result["paths"].items():
+            if path == "/tts" or path.startswith("/v1/"):
+                for operation in methods.values():
+                    operation["security"] = [{"ApiKey": []}]
+        return result
+
+    app.add_middleware(SecurityMiddleware, settings=settings)
+    origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "DELETE"],
+            allow_headers=["Content-Type", "Authorization", "X-API-Key"],
+            expose_headers=["X-Voice", "X-Inference-Ms", "Retry-After", "Location"],
+        )
+    app.add_middleware(PrefixMiddleware, settings=settings, routes=app.router.routes)
     return app
 
 
@@ -123,6 +188,12 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
 
-    settings = Settings.from_env()
-    # 直接传入已创建的 app 实例，避免字符串导入导致后端被初始化两次
-    uvicorn.run(app, host=settings.host, port=settings.port)
+    settings = app.state.settings
+    uvicorn.run(
+        app,
+        host=settings.host,
+        port=settings.port,
+        workers=1,
+        proxy_headers=True,
+        forwarded_allow_ips=settings.forwarded_allow_ips,
+    )

@@ -4,12 +4,16 @@
 
 A text-to-speech service and admin console built on [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS). It exposes a `/tts` endpoint fully compatible with the Mambo TTS API, with multi-voice management, weight upload, concurrent queuing, and a built-in web console.
 
+**v2 security upgrade:** synthesis now requires an administrator-issued API Key. Anonymous management is disabled. The `/tts` body and WAV response are preserved; add `Authorization: Bearer <API_KEY>` to existing clients. Set `TTS_ADMIN_TOKEN`, sign in, create a trusted user, then issue a key. See [deployment and ALB prefix configuration](docs/deployment.md).
+
 ## Features
 
 - **Mambo TTS API compatible**: `POST /tts` with the same parameters, defaults, and error format (`{"message": "..."}`) — drop-in replacement for existing clients
 - **Multi-voice management**: create / edit / delete voices, upload GPT weights (.ckpt), SoVITS weights (.pth), and reference audio; Chinese voice names supported
-- **Hot weight switching**: the model swaps automatically per requested voice; loaded weights are cached and reused, so switching costs nothing
-- **Concurrency**: requests run in a thread pool (auto-sized from CPU cores + available memory); inference is guarded by a global serial lock — requests queue up cleanly, never race, and the event loop never blocks
+- **Hot weight switching**: the model swaps automatically per requested voice; already loaded weights are reused; changing voices can reload weights
+- **Trusted-user access**: hashed API keys, user policies, expiry, rotation and revocation; browser admin sessions with CSRF protection
+- **Bounded scheduling**: global/per-user concurrency and queues, request/character quotas, priority with waiting-time aging
+- **Long jobs**: submit, poll, download and cancel asynchronous jobs behind an ALB
 - **Web console**: voice management, online audition, live queue status, API docs — pure static pages, no build step
 - **Prebuilt voice packs**: one-command install from GitHub Release (`scripts/download_voices.py`)
 
@@ -139,6 +143,14 @@ existing voice directories; use `--data-dir` for an isolated build directory.
 
 ### 7. Run
 
+Generate and privately save a random admin token, then set `TTS_ADMIN_TOKEN` before starting (at least 24 characters):
+
+```bash
+$PY -c "import secrets; print(secrets.token_urlsafe(32))"
+# Linux/macOS: export TTS_ADMIN_TOKEN='<generated token>'
+# PowerShell: $env:TTS_ADMIN_TOKEN='<generated token>'
+```
+
 ```bash
 # Linux / macOS
 TTS_BACKEND=gsv GSV_DEVICE=auto $PY -m app.main
@@ -157,16 +169,24 @@ Open the console: <http://127.0.0.1:9880/console/>
 |------|--------|------|
 | `TTS_HOST` | `0.0.0.0` | Listen address |
 | `TTS_PORT` | `9880` | Listen port |
-| `TTS_BACKEND` | `auto` | `auto` (use GPT-SoVITS when available) / `gsv` (require it, fail loudly) |
+| `TTS_BACKEND` | `gsv` | `gsv` / `auto` require a working real backend; explicit `mock` is for testing |
 | `TTS_DATA_DIR` | `./data` | Voice & registry storage directory |
 | `GSV_ROOT` | `./GPT-SoVITS` | GPT-SoVITS repo directory |
 | `GSV_CONFIG` | `<GSV_ROOT>/GPT_SoVITS/configs/tts_infer.yaml` | Inference config |
 | `GSV_DEVICE` | `auto` | `auto` / `cuda` / `mps` / `cpu` |
 | `GSV_IS_HALF` | `auto` | `auto` (half precision on CUDA) / `true` / `false` |
-| `TTS_WORKERS` | `0` (auto) | Thread pool size; 0 = CPU cores + 4, shrunk by free memory (cap 32) |
-| `TTS_MAX_QUEUE` | `0` (unlimited) | Max queued requests; overflow gets 503 |
-| `TTS_ADMIN_TOKEN` | empty | If set, `/api/*` requires the `X-Admin-Token` header |
-| `TTS_CORS_ORIGINS` | `*` | Allowed CORS origins, comma-separated |
+| `TTS_WORKERS` | `0` (auto) | Thread budget, capped by backend capacity; GPT-SoVITS supports 1 shared-pipeline inference |
+| `TTS_MAX_QUEUE` | `64` | Initial waiting queue limit, excluding running work; overflow returns 429 |
+| `TTS_ADMIN_TOKEN` | empty | Required admin credential, at least 24 characters; unset closes management |
+| `TTS_CORS_ORIGINS` | empty | Same origin by default; explicitly list API client origins if needed |
+| `UMEKO_TTS_BASE_URL` | empty | Public URL or path prefix, e.g. `https://tts.example.com/services/voice` |
+| `TTS_CONCURRENCY` | `1` | Initial global inference concurrency, bounded by backend capacity |
+| `TTS_QUEUE_TIMEOUT` | `120` | Initial queue wait timeout in seconds |
+| `TTS_PRIORITY_AGING_SECONDS` | `15` | Priority increases by one after this waiting interval |
+| `TTS_MAX_TEXT_CHARS` | `4000` | Service-wide input character cap; user cap also applies |
+| `TTS_RESULT_TTL` / `TTS_RESULT_MAX_MB` | `600` / `64` | In-memory result retention seconds / total MiB |
+| `TTS_SESSION_SECONDS` / `TTS_MAX_UPLOAD_MB` | `28800` / `512` | Admin session lifetime / multipart request cap |
+| `TTS_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted proxy IPs/CIDRs for the built-in launcher |
 
 ## TTS Endpoint
 
@@ -190,11 +210,14 @@ Open the console: <http://127.0.0.1:9880/console/>
 ```bash
 # Minimal call
 curl -X POST http://127.0.0.1:9880/tts \
+  -H "Authorization: Bearer $UMEKO_TTS_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world"}' -o output.wav
 ```
 
 ## Admin API (/api/*)
+
+Browser sessions require CSRF on writes; admin scripts may send `X-Admin-Token`. API Keys cannot administer the service. User/key issuance, revocation/rotation, queue cancellation, scheduler settings and audit endpoints are described in [deployment](docs/deployment.md); authenticated schema: `/api/openapi`.
 
 | Method | Path | Description |
 |------|------|------|
@@ -210,25 +233,22 @@ A usable voice = GPT weights + SoVITS weights + reference audio (+ reference tex
 
 ## Concurrency Model
 
-```
-request → FastAPI event loop → thread pool (loop never blocks)
-                                └→ global serial lock → weight switch + inference (queued)
-```
+Global and per-user slots govern a bounded priority queue. Higher user priority (0–10) runs first; equal priority is FIFO. Waiting requests gain priority over time to prevent starvation. GPT-SoVITS has one shared pipeline, so its safe inference capacity is 1. Cancelled running jobs keep their slot until real inference exits.
 
-- Pool size auto-adapts to hardware; pin it with `TTS_WORKERS`
-- The serial lock keeps single-GPU / CPU inference from interleaving; multi-voice requests serialize with automatic weight switching
-- The console status bar refreshes queue counts every 3 seconds (pending / running / done / failed)
+Keys belonging to one user share limits. Accepted characters are reserved; success commits usage, while failure/timeout/cancellation releases it. Accepted requests still count toward RPM. Daily quotas use UTC. Console changes to concurrency/queue policy persist across restarts.
+
+Use `POST /v1/jobs`, poll `GET /v1/jobs/{id}`, then download `/audio`; include an API Key on every request. Jobs/results are memory-local and expire. Run one instance/ASGI worker; this version does not provide cross-instance global scheduling. See [deployment boundaries](docs/deployment.md).
 
 ## Smoke Test
 
-With the service running:
+Isolated regression tests need no model weights and do not touch a running service:
 
 ```bash
-$PY scripts/smoke_test.py            # default http://127.0.0.1:9880
-$PY scripts/smoke_test.py http://host:port
+uv pip install --python $PY -r requirements-dev.txt
+$PY -m pytest tests -q
 ```
 
-Covers: status, voice CRUD (incl. Chinese names and file upload), minimal / full / invalid params, error format, 8-way concurrency, max_sec truncation, console page.
+Covers authentication/CSRF, key lifecycle, shared quotas, priority/aging, cancellation, user isolation and root/nested proxy prefixes. `scripts/smoke_test.py <base_url>` checks a deployed instance with a dedicated `UMEKO_TTS_API_KEY` without changing voices.
 
 ## Directory Layout
 
@@ -239,7 +259,7 @@ umeko-tts-server/
 │   ├── config.py          # Environment-based config
 │   ├── schemas.py         # /tts request model (Mambo compatible)
 │   ├── registry.py        # Voice registry (JSON persistence, thread-safe)
-│   ├── engine.py          # Thread pool + serial lock + cut_punc split + max_sec truncation
+│   ├── engine.py          # Bounded priority queue, user policies and safe inference slots
 │   ├── backends/
 │   │   ├── base.py        # Backend interface
 │   │   └── gsv.py         # GPT-SoVITS inference (TTS_infer_pack, hot weight switch)
@@ -258,7 +278,7 @@ umeko-tts-server/
 
 ## Production Notes
 
-- Set `TTS_ADMIN_TOKEN` and reverse-proxy with Nginx (raise `client_max_body_size` to ~500 MB to fit weight uploads)
-- For long texts, use a client timeout of 120 s or more; `max_sec` effectively prevents runaway CPU inference
+- Configure a random `TTS_ADMIN_TOKEN`, HTTPS `UMEKO_TTS_BASE_URL`, trusted proxy IPs and private origin access; see [deployment](docs/deployment.md).
+- Use asynchronous jobs for long requests behind an ALB. `max_sec` caps output duration, not the runtime of an individual model call.
 - On Windows, this project monkey-patches `torchaudio.load` with a soundfile implementation (`app/backends/gsv.py`), so no FFmpeg DLLs are needed for torchaudio ≥ 2.9
 - To publish your own voice packs: `$PY scripts/pack_voices.py`

@@ -1,9 +1,10 @@
 """请求 / 响应数据模型。/tts 参数与 Mambo TTS API 完全兼容。"""
+
 from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SUPPORTED_LANGS = ("zh", "en", "ja", "ko", "yue", "auto")
 
@@ -13,25 +14,31 @@ def _clamp(v: float, lo: float, hi: float) -> float:
 
 
 class TTSRequest(BaseModel):
-    text: str
+    model_config = ConfigDict(allow_inf_nan=False)
+    text: str = Field(min_length=1, max_length=10000)
     text_lang: str = "zh"
     speed_factor: float = 1.0
     top_k: int = 15
     top_p: float = 1.0
     temperature: float = 1.0
-    cut_punc: str = ""
+    cut_punc: str = Field(default="", max_length=32)
     max_sec: float = 10.0
     # 扩展参数（可选）：指定音色名称，缺省使用默认音色。不影响 Mambo 兼容性。
-    voice: Optional[str] = None
+    voice: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("text")
+    @classmethod
+    def _text(cls, value):
+        if not value.strip() or any(ord(c) < 32 and c not in "\n\r\t" for c in value):
+            raise ValueError("文本不能为空或包含控制字符")
+        return value.strip()
 
     @field_validator("text_lang")
     @classmethod
     def _check_lang(cls, v: str) -> str:
         v = (v or "zh").strip().lower()
         if v not in SUPPORTED_LANGS:
-            raise ValueError(
-                f"不支持的语种: {v}，可选: {'/'.join(SUPPORTED_LANGS)}"
-            )
+            raise ValueError(f"不支持的语种: {v}，可选: {'/'.join(SUPPORTED_LANGS)}")
         return v
 
     def normalized(self) -> "TTSRequest":
