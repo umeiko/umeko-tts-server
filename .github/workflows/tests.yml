@@ -1,0 +1,44 @@
+name: Service regression
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  service:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.11']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest tests -q
+      - run: node --check app/static/app.js
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install -r requirements-dev.txt
+      - run: npm install --no-save --package-lock=false playwright@1.62.1
+      - run: npx playwright install --with-deps chromium
+      - run: python tests/ui_server.py --data-dir tmp/browser-ci --port 10990 > /tmp/umeko-ui.log 2>&1 &
+      - run: node tests/browser_smoke.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-evidence
+          path: |
+            tmp/admin-browser
+            /tmp/umeko-ui.log
