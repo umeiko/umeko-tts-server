@@ -113,7 +113,9 @@ class VoiceRegistry:
 
     @staticmethod
     def validate_name(name: str):
-        if not NAME_RE.match(name or ""):
+        if not NAME_RE.fullmatch(name or "") or name.upper() in {
+            "CON", "PRN", "AUX", "NUL", *[f"COM{i}" for i in range(1, 10)], *[f"LPT{i}" for i in range(1, 10)]
+        }:
             raise VoiceError("音色名称只能包含中英文、数字、下划线和短横线，长度 1-64")
 
     def create(self, name: str, description="", ref_text="", ref_lang="zh") -> Voice:
@@ -168,12 +170,19 @@ class VoiceRegistry:
     # ---------- 路径与状态 ----------
 
     def voice_dir(self, name: str) -> Path:
-        return self.voices_dir / name
+        self.validate_name(name)
+        result = (self.voices_dir / name).resolve()
+        if not result.is_relative_to(self.voices_dir.resolve()):
+            raise VoiceError("音色目录越界")
+        return result
 
     def abs_path(self, rel: str) -> Path | None:
         if not rel:
             return None
-        return self.data_dir / rel
+        result = (self.data_dir / rel).resolve()
+        if not result.is_relative_to(self.data_dir.resolve()):
+            raise VoiceError("音色文件路径越界")
+        return result
 
     def file_exists(self, v: Voice, kind: str) -> bool:
         p = self.abs_path(getattr(v, FILE_FIELD[kind]))

@@ -4,12 +4,16 @@
 
 基于 [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) 的文本转语音服务与管理控制台。对外提供与 Mambo TTS API 完全兼容的 `/tts` 接口，内置多音色管理、权重上传、并发排队与 Web 控制台。
 
+**v2 升级说明：合成需要管理员发放的 API Key，管理接口不再允许匿名访问。** `/tts` 请求体与 WAV 响应保留，老客户端需增加 `Authorization: Bearer <API_KEY>`。先设置 `TTS_ADMIN_TOKEN`、登录面板、创建可信用户，再发放密钥。前缀与 ALB 部署见 [部署文档](docs/deployment.md)。
+
 ## 功能特性
 
 - **兼容 Mambo TTS API**：`POST /tts`，参数、默认值、错误格式（`{"message": "..."}`）一致，可直接替换现有客户端
 - **多音色管理**：新增 / 编辑 / 删除音色，上传 GPT 权重（.ckpt）、SoVITS 权重（.pth）、参考音频；支持中文音色名
-- **权重热切换**：按请求的音色自动切换模型，已加载权重缓存复用，切换零开销
-- **并发支持**：请求进入线程池（按 CPU 核数 + 可用内存自动适配），推理由全局串行锁保护，多请求自动排队、不竞态、事件循环不阻塞
+- **权重热切换**：按请求的音色自动切换模型，已加载权重可复用，不同音色切换可能重新加载模型
+- **访问管理**：用户启停、密钥摘要存储、有效期、轮换与撤销；管理员会话与 CSRF 保护
+- **有界调度**：全局/用户并发与排队上限、请求/字符额度、优先级与等待时间提升
+- **长任务接口**：异步提交、查询、下载与取消，适合多人排队与 ALB 访问
 - **Web 控制台**：音色管理、在线试听、实时队列状态、接口文档，纯静态页面无需构建
 - **预置音色包**：从 GitHub Release 一键安装（`scripts/download_voices.py`）
 
@@ -136,6 +140,14 @@ $PY scripts/download_voices.py --file narrator_male.zip --file narrator_female.z
 
 ### 7. 启动
 
+启动前生成并妥善保存随机管理员令牌，设置为 `TTS_ADMIN_TOKEN`（至少 24 字符）：
+
+```bash
+$PY -c "import secrets; print(secrets.token_urlsafe(32))"
+# Linux/macOS: export TTS_ADMIN_TOKEN='<generated token>'
+# PowerShell: $env:TTS_ADMIN_TOKEN='<generated token>'
+```
+
 ```bash
 # Linux / macOS
 TTS_BACKEND=gsv GSV_DEVICE=auto $PY -m app.main
@@ -154,16 +166,24 @@ $env:TTS_BACKEND="gsv"; $env:GSV_DEVICE="auto"; & .venv/Scripts/python.exe -m ap
 |------|--------|------|
 | `TTS_HOST` | `0.0.0.0` | 监听地址 |
 | `TTS_PORT` | `9880` | 监听端口 |
-| `TTS_BACKEND` | `auto` | `auto`（有 GPT-SoVITS 就用）/ `gsv`（强制，缺失即报错） |
+| `TTS_BACKEND` | `gsv` | 真实后端失败即停止；`mock` 仅用于明确选择的本地测试 |
 | `TTS_DATA_DIR` | `./data` | 音色与注册表存储目录 |
 | `GSV_ROOT` | `./GPT-SoVITS` | GPT-SoVITS 仓库目录 |
 | `GSV_CONFIG` | `<GSV_ROOT>/GPT_SoVITS/configs/tts_infer.yaml` | 推理配置 |
 | `GSV_DEVICE` | `auto` | `auto` / `cuda` / `mps` / `cpu` |
 | `GSV_IS_HALF` | `auto` | `auto`（CUDA 下半精度）/ `true` / `false` |
-| `TTS_WORKERS` | `0`（自动） | 线程池大小，0 = CPU 核数+4 并按可用内存收缩（上限 32） |
-| `TTS_MAX_QUEUE` | `0`（不限） | 最大排队请求数，超出返回 503 |
-| `TTS_ADMIN_TOKEN` | 空 | 设置后 `/api/*` 需请求头 `X-Admin-Token` |
-| `TTS_CORS_ORIGINS` | `*` | 允许的跨域来源，逗号分隔 |
+| `TTS_WORKERS` | `0`（自动） | 推理线程预算，受后端容量限制；GPT-SoVITS 共享管线上限 1 |
+| `TTS_MAX_QUEUE` | `64` | 首次启动时的等待队列上限，不含运行中任务；超出返回 429 |
+| `TTS_ADMIN_TOKEN` | 空 | 管理员登录凭证，至少 24 字符；未配置则关闭管理接口 |
+| `TTS_CORS_ORIGINS` | 空 | 默认同源；可显式列出 API 客户端来源 |
+| `UMEKO_TTS_BASE_URL` | 空 | 外部完整 URL 或前缀，如 `https://tts.example.com/services/voice` |
+| `TTS_CONCURRENCY` | `1` | 首次启动时的全局推理并行数，受后端容量限制 |
+| `TTS_QUEUE_TIMEOUT` | `120` | 首次启动时的排队超时秒数 |
+| `TTS_PRIORITY_AGING_SECONDS` | `15` | 每等待此秒数，调度优先级增加 1 |
+| `TTS_MAX_TEXT_CHARS` | `4000` | 服务单次字符硬上限，同时受用户上限约束 |
+| `TTS_RESULT_TTL` / `TTS_RESULT_MAX_MB` | `600` / `64` | 内存结果保留秒数 / 总缓存 MiB |
+| `TTS_SESSION_SECONDS` / `TTS_MAX_UPLOAD_MB` | `28800` / `512` | 管理员会话秒数 / 上传请求体大小上限 |
+| `TTS_FORWARDED_ALLOW_IPS` | `127.0.0.1` | 内置启动入口所信任的代理 IP/CIDR |
 
 ## TTS 合成接口
 
@@ -187,11 +207,14 @@ $env:TTS_BACKEND="gsv"; $env:GSV_DEVICE="auto"; & .venv/Scripts/python.exe -m ap
 ```bash
 # 最小调用
 curl -X POST http://127.0.0.1:9880/tts \
+  -H "Authorization: Bearer $UMEKO_TTS_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"text": "你好世界"}' -o output.wav
 ```
 
 ## 管理接口（/api/*）
+
+浏览器使用会话 Cookie 与写操作 CSRF；管理员自动化可发送 `X-Admin-Token`。普通 API Key 无管理权限。用户/密钥的创建与启停、撤销/轮换、队列取消、调度设置与审计接口见 [部署文档](docs/deployment.md)，登录后可获取 `/api/openapi`。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -207,25 +230,22 @@ curl -X POST http://127.0.0.1:9880/tts \
 
 ## 并发模型
 
-```
-请求 → FastAPI 事件循环 → 线程池执行（不阻塞 loop）
-                           └→ 全局串行锁 → 权重切换 + 推理（逐请求排队）
-```
+全局与每用户名额共同限制有界队列。用户优先级 0–10，大者优先，同级 FIFO；等待中的任务逐步提升优先级，避免饥饿。GPT-SoVITS 共享一份模型管线，安全推理容量为 1。取消运行中的任务后，实际推理结束才释放名额。
 
-- 线程池大小自动适配硬件，也可用 `TTS_WORKERS` 固定
-- 串行锁保证单卡 / CPU 推理不会并发交错，多音色请求自动串行切换权重
-- 控制台状态栏每 3 秒刷新队列计数（待处理 / 执行中 / 完成 / 失败）
+同一用户的多把密钥共享限额。接受请求时预留字符，成功后结算，失败/超时/取消释放；已接受请求仍计入每分钟限额。每日额度按 UTC 日界线统计。面板修改的并发与队列设置会持久保存。
+
+长任务使用 `POST /v1/jobs` 提交、`GET /v1/jobs/{id}` 查询、`/audio` 下载，每次携带 API Key。任务和音频位于内存且会过期。当前运行一个实例与一个 ASGI worker，不提供跨实例全局队列，详见 [部署边界](docs/deployment.md)。
 
 ## 冒烟测试
 
-服务运行中执行：
+隔离回归无需模型权重，也不会访问或删除运行中服务的音色：
 
 ```bash
-$PY scripts/smoke_test.py            # 默认 http://127.0.0.1:9880
-$PY scripts/smoke_test.py http://host:port
+uv pip install --python $PY -r requirements-dev.txt
+$PY -m pytest tests -q
 ```
 
-覆盖：状态、音色 CRUD（含中文名与文件上传）、最小 / 完整 / 非法参数、错误格式、8 路并发、max_sec 截断、控制台页面。
+覆盖鉴权/CSRF、密钥生命周期、共享额度、优先级与老化、取消、用户隔离和根路径/多级代理前缀。`scripts/smoke_test.py <base_url>` 可通过专用 `UMEKO_TTS_API_KEY` 检查已部署实例，不修改音色。
 
 ## 目录结构
 
@@ -236,7 +256,7 @@ umeko-tts-server/
 │   ├── config.py          # 环境变量配置
 │   ├── schemas.py         # /tts 请求模型（Mambo 兼容）
 │   ├── registry.py        # 音色注册表（JSON 持久化，线程安全）
-│   ├── engine.py          # 线程池 + 串行锁 + cut_punc 切分 + max_sec 截断
+│   ├── engine.py          # 有界优先级队列、用户策略与安全推理名额
 │   ├── backends/
 │   │   ├── base.py        # 后端接口
 │   │   └── gsv.py         # GPT-SoVITS 推理（TTS_infer_pack，权重热切换）
@@ -255,7 +275,7 @@ umeko-tts-server/
 
 ## 生产部署提示
 
-- 建议设置 `TTS_ADMIN_TOKEN`，并用 Nginx 反代（`client_max_body_size` 调到 500MB 左右以容纳权重上传）
-- 长文本建议客户端设置 120 秒以上超时；`max_sec` 可有效防止 CPU 推理失控
+- 配置随机管理员令牌、HTTPS `UMEKO_TTS_BASE_URL`、可信代理与源站访问限制，详见 [部署文档](docs/deployment.md)。
+- 通过 ALB 访问长任务时使用异步接口；`max_sec` 限制输出长度，不能保证中断单次模型调用。
 - Windows 上本项目把 `torchaudio.load` 补丁为 soundfile 实现（`app/backends/gsv.py`），torchaudio ≥ 2.9 无需安装 FFmpeg DLL
 - 发布自己的音色包：`$PY scripts/pack_voices.py`

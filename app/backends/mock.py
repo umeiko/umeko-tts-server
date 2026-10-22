@@ -16,6 +16,7 @@ _PUNCS = set("，。！？；：、,.!?;:… \t\r\n")
 
 
 class MockBackend(BaseBackend):
+    max_concurrency = 32
     name = "mock"
     requires_files = False
 

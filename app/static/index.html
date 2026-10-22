@@ -1,211 +1,630 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Umeko TTS 控制台</title>
-  <link rel="stylesheet" href="style.css">
-</head>
-<body>
-  <header>
-    <div class="brand">Umeko TTS</div>
-    <div class="status-bar" id="statusBar">
-      <span class="stat" id="stBackend">后端: …</span>
-      <span class="stat" id="stDevice">设备: …</span>
-      <span class="stat" id="stWorkers">线程: …</span>
-      <span class="stat" id="stQueue">队列: …</span>
-      <span class="stat" id="stDefault">默认音色: …</span>
-      <span class="stat" id="stUptime">运行: …</span>
-    </div>
-  </header>
-
-  <div class="banner hidden" id="mockBanner">
-    当前运行的是演示后端（未接入 GPT-SoVITS），输出为正弦波测试音频。配置 GPT-SoVITS 后重启服务即可获得真实合成效果。
-  </div>
-
-  <nav class="tabs">
-    <button class="tab active" data-tab="voices">音色管理</button>
-    <button class="tab" data-tab="synth">在线合成</button>
-    <button class="tab" data-tab="docs">接口文档</button>
-  </nav>
-
-  <main>
-    <!-- 音色管理 -->
-    <section id="tab-voices" class="tab-page active">
-      <div class="toolbar">
-        <button class="btn primary" id="btnNewVoice">+ 新增音色</button>
-        <button class="btn" id="btnRefresh">刷新</button>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="umeko-base-path" content="__BASE_PATH__" />
+    <meta name="umeko-base-url" content="__BASE_URL__" />
+    <title>Umeko TTS · 管理控制台</title>
+    <link rel="stylesheet" href="__BASE_PATH__/console/style.css" />
+    <script src="__BASE_PATH__/console/app.js" defer></script>
+  </head>
+  <body>
+    <section id="loginView" class="login-view">
+      <div class="login-story">
+        <div class="logo">u<span>m</span></div>
+        <p class="eyebrow">UMEKO TTS</p>
+        <h1>把好声音，<br />有序地分享出去。</h1>
+        <p>
+          为可信用户发放密钥，分配合成额度，<br />让每个请求都有自己的位置。
+        </p>
+        <div class="sound-bars" aria-hidden="true">
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i
+          ><i></i>
+        </div>
+        <small>OPEN SOURCE · SELF HOSTED</small>
       </div>
-      <div class="voice-grid" id="voiceGrid">
-        <div class="empty" id="voiceEmpty">暂无音色，点击「新增音色」创建</div>
-      </div>
+      <form id="loginForm" class="login-card">
+        <span class="tag">管理员入口</span>
+        <h2>登录管理控制台</h2>
+        <p class="muted">使用部署时设置的管理员令牌。</p>
+        <label for="adminToken">管理员令牌</label
+        ><input
+          id="adminToken"
+          type="password"
+          required
+          autocomplete="current-password"
+          placeholder="输入 TTS_ADMIN_TOKEN"
+        /><button type="submit" class="primary wide" id="loginButton">
+          进入控制台 →
+        </button>
+        <p id="loginError" class="error" role="alert"></p>
+        <p class="hint">令牌仅用于建立登录会话，不保存在浏览器存储中。</p>
+      </form>
     </section>
 
-    <!-- 在线合成 -->
-    <section id="tab-synth" class="tab-page">
-      <div class="panel">
-        <div class="form-row">
-          <label>音色</label>
-          <select id="fVoice"></select>
+    <div id="appView" class="app-view hidden">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-icon">u</span>
+          <div>Umeko TTS<small>管理控制台</small></div>
         </div>
-        <div class="form-row">
-          <label>文本 <span class="req">*</span></label>
-          <textarea id="fText" rows="5" placeholder="输入要合成语音的文本，支持中 / 英 / 日 / 韩 / 粤语">你好世界，这是语音合成测试。</textarea>
+        <p class="nav-label">工作空间</p>
+        <nav aria-label="主导航">
+          <button data-page="overview" class="nav-item active">
+            <span aria-hidden="true">◈</span>服务总览</button
+          ><button data-page="users" class="nav-item">
+            <span aria-hidden="true">◎</span>用户与密钥</button
+          ><button data-page="queue" class="nav-item">
+            <span aria-hidden="true">≋</span>合成队列</button
+          ><button data-page="voices" class="nav-item">
+            <span aria-hidden="true">♫</span>音色与试听</button
+          ><button data-page="docs" class="nav-item">
+            <span aria-hidden="true">⌘</span>接入文档
+          </button>
+        </nav>
+        <div class="sidebar-bottom">
+          <span class="live-dot"></span>私有语音合成服务
+          <p id="sidebarBackend">正在连接…</p>
+          <button id="logoutButton" class="quiet">退出登录 ↗</button>
         </div>
-        <div class="param-grid">
-          <div class="form-row">
-            <label>语种</label>
-            <select id="fLang">
-              <option value="zh">zh 中文</option>
-              <option value="en">en 英文</option>
-              <option value="ja">ja 日文</option>
-              <option value="ko">ko 韩文</option>
-              <option value="yue">yue 粤语</option>
-              <option value="auto">auto 自动检测</option>
-            </select>
+      </aside>
+      <div class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">UMEKO / TTS SERVICE</p>
+            <h1 id="pageTitle">服务总览</h1>
           </div>
-          <div class="form-row">
-            <label>语速 (0.5~2.0)</label>
-            <input type="number" id="fSpeed" value="1.0" step="0.1" min="0.5" max="2.0">
+          <div class="header-actions">
+            <span id="connectionBadge" class="pill">连接中</span
+            ><button id="refreshButton">刷新</button>
+            <button id="mobileLogoutButton" class="mobile-only">退出</button>
           </div>
-          <div class="form-row">
-            <label>top_k (1~100)</label>
-            <input type="number" id="fTopK" value="15" step="1" min="1" max="100">
+        </header>
+        <main>
+          <div id="demoBanner" class="notice hidden">
+            当前是测试后端，输出为测试音，不是真实语音。部署时请选择
+            GPT-SoVITS。
           </div>
-          <div class="form-row">
-            <label>top_p (0~1)</label>
-            <input type="number" id="fTopP" value="1.0" step="0.05" min="0" max="1">
-          </div>
-          <div class="form-row">
-            <label>temperature (0.1~2.0)</label>
-            <input type="number" id="fTemp" value="1.0" step="0.1" min="0.1" max="2.0">
-          </div>
-          <div class="form-row">
-            <label>切分符号</label>
-            <input type="text" id="fCutPunc" placeholder="留空自动切分，如: 。！？">
-          </div>
-          <div class="form-row">
-            <label>最大秒数 (0.5~60)</label>
-            <input type="number" id="fMaxSec" value="10" step="1" min="0.5" max="60">
-          </div>
-        </div>
-        <div class="form-row">
-          <button class="btn primary big" id="btnSynth">开始合成</button>
-        </div>
-        <div class="result hidden" id="synthResult">
-          <div class="result-meta" id="synthMeta"></div>
-          <audio id="synthAudio" controls></audio>
-          <a class="btn" id="synthDownload" download="tts.wav">下载 WAV</a>
-        </div>
-      </div>
-    </section>
-
-    <!-- 接口文档 -->
-    <section id="tab-docs" class="tab-page">
-      <div class="panel doc">
-        <h3>TTS 合成接口</h3>
-        <p><code>POST <span id="docBase"></span>/tts</code> &nbsp;·&nbsp; <code>Content-Type: application/json</code></p>
-        <table>
-          <thead><tr><th>参数</th><th>类型</th><th>必填</th><th>默认值</th><th>说明</th></tr></thead>
-          <tbody>
-            <tr><td>text</td><td>string</td><td>是</td><td>—</td><td>要合成的文本，支持中/英/日/韩/粤语</td></tr>
-            <tr><td>voice</td><td>string</td><td>否</td><td>默认音色</td><td>扩展参数：音色名称</td></tr>
-            <tr><td>text_lang</td><td>string</td><td>否</td><td>zh</td><td>zh / en / ja / ko / yue / auto</td></tr>
-            <tr><td>speed_factor</td><td>float</td><td>否</td><td>1.0</td><td>语速倍率 0.5~2.0</td></tr>
-            <tr><td>top_k</td><td>int</td><td>否</td><td>15</td><td>采样 top-k，1~100</td></tr>
-            <tr><td>top_p</td><td>float</td><td>否</td><td>1.0</td><td>核采样阈值 0~1</td></tr>
-            <tr><td>temperature</td><td>float</td><td>否</td><td>1.0</td><td>采样温度 0.1~2.0</td></tr>
-            <tr><td>cut_punc</td><td>string</td><td>否</td><td>""</td><td>手动指定切分标点，留空自动切分</td></tr>
-            <tr><td>max_sec</td><td>float</td><td>否</td><td>10.0</td><td>最大音频秒数，最长 60</td></tr>
-          </tbody>
-        </table>
-        <p>成功返回 <code>audio/wav</code> 二进制；失败返回 <code>{"message": "错误描述"}</code>。</p>
-        <h4>最小示例</h4>
-        <pre id="docCurlMin"></pre>
-        <h4>完整示例</h4>
-        <pre id="docCurlFull"></pre>
-        <h3>管理接口</h3>
-        <table>
-          <thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead>
-          <tbody>
-            <tr><td>GET</td><td>/api/status</td><td>服务状态（后端 / 队列 / 运行时长）</td></tr>
-            <tr><td>GET</td><td>/api/voices</td><td>音色列表</td></tr>
-            <tr><td>POST</td><td>/api/voices</td><td>新增音色（multipart：name*、description、ref_text、ref_lang、gpt_file、sovits_file、ref_audio）</td></tr>
-            <tr><td>PUT</td><td>/api/voices/{name}</td><td>更新音色（字段与新增相同，均可选）</td></tr>
-            <tr><td>DELETE</td><td>/api/voices/{name}</td><td>删除音色及其文件</td></tr>
-            <tr><td>POST</td><td>/api/voices/{name}/default</td><td>设为默认音色</td></tr>
-            <tr><td>GET</td><td>/api/voices/{name}/ref-audio</td><td>下载参考音频</td></tr>
-          </tbody>
-        </table>
-        <p>设置环境变量 <code>TTS_ADMIN_TOKEN</code> 后，管理接口需携带请求头 <code>X-Admin-Token</code>。</p>
-      </div>
-    </section>
-  </main>
-
-  <!-- 音色编辑弹窗 -->
-  <div class="modal-mask hidden" id="voiceModal">
-    <div class="modal">
-      <div class="modal-title" id="voiceModalTitle">新增音色</div>
-      <div class="form-row">
-        <label>名称 <span class="req">*</span></label>
-        <input type="text" id="vName" placeholder="中英文、数字、_、-，1-64 字">
-      </div>
-      <div class="form-row">
-        <label>描述</label>
-        <input type="text" id="vDesc" placeholder="选填">
-      </div>
-      <div class="form-row">
-        <label>参考音频</label>
-        <input type="file" id="vRefAudio" accept=".wav,.mp3,.ogg,.flac,.m4a">
-        <div class="hint">3~10 秒清晰人声，zero-shot 克隆的音源</div>
-      </div>
-      <div class="form-row">
-        <label>参考文本</label>
-        <textarea id="vRefText" rows="2" placeholder="参考音频对应的文字内容"></textarea>
-      </div>
-      <div class="form-row">
-        <label>参考语种</label>
-        <select id="vRefLang">
-          <option value="zh">zh 中文</option>
-          <option value="en">en 英文</option>
-          <option value="ja">ja 日文</option>
-          <option value="ko">ko 韩文</option>
-          <option value="yue">yue 粤语</option>
-        </select>
-      </div>
-      <div class="form-row">
-        <label>GPT 权重</label>
-        <input type="file" id="vGpt" accept=".ckpt,.safetensors">
-        <div class="hint">.ckpt（-e15 等训练产物）</div>
-      </div>
-      <div class="form-row">
-        <label>SoVITS 权重</label>
-        <input type="file" id="vSovits" accept=".pth,.ckpt,.safetensors">
-        <div class="hint">.pth（s2G… 或微调产物）</div>
-      </div>
-      <div class="progress hidden" id="uploadProgress"><div class="progress-inner" id="uploadProgressBar"></div></div>
-      <div class="modal-actions">
-        <button class="btn" id="btnVoiceCancel">取消</button>
-        <button class="btn primary" id="btnVoiceSave">保存</button>
+          <section id="page-overview" class="page active">
+            <div class="metrics">
+              <article>
+                <span>正在合成</span><strong id="metricRunning">0</strong
+                ><small id="metricCapacity">— 个并行名额</small>
+              </article>
+              <article>
+                <span>等待中的请求</span><strong id="metricQueued">0</strong
+                ><small>按优先级与等待时间调度</small>
+              </article>
+              <article>
+                <span>可信用户</span><strong id="metricUsers">0</strong
+                ><small id="metricKeys">0 个可用密钥</small>
+              </article>
+              <article>
+                <span>今日合成字符</span><strong id="metricChars">0</strong
+                ><small>按 UTC 日界线统计</small>
+              </article>
+            </div>
+            <div class="overview-grid">
+              <article class="panel">
+                <div class="section-head">
+                  <div>
+                    <p class="eyebrow">SCHEDULER</p>
+                    <h2>调度与并发</h2>
+                  </div>
+                  <span class="tag">实时生效</span>
+                </div>
+                <form id="settingsForm">
+                  <div class="field-grid">
+                    <label
+                      >全局推理并行数<input
+                        type="number"
+                        id="globalConcurrency"
+                        min="1"
+                        max="32"
+                        required /></label
+                    ><label
+                      >全局最多排队<input
+                        type="number"
+                        id="globalQueue"
+                        min="1"
+                        max="1000"
+                        required /></label
+                    ><label
+                      >排队超时（秒）<input
+                        type="number"
+                        id="queueTimeout"
+                        min="1"
+                        max="3600"
+                        required /></label
+                    ><label
+                      >优先级提升间隔（秒）<input
+                        type="number"
+                        id="agingSeconds"
+                        min="1"
+                        max="600"
+                        required
+                    /></label>
+                  </div>
+                  <p class="hint" id="capacityHint"></p>
+                  <p class="hint">
+                    数字越大优先级越高。同级先到先服务；等待越久，调度优先级越高。
+                  </p>
+                  <button type="submit" class="primary">保存调度设置</button>
+                </form>
+              </article>
+              <article class="panel">
+                <div class="section-head">
+                  <div>
+                    <p class="eyebrow">SERVICE</p>
+                    <h2>服务信息</h2>
+                  </div>
+                </div>
+                <dl class="service-info">
+                  <dt>推理后端</dt>
+                  <dd id="infoBackend">—</dd>
+                  <dt>运行设备</dt>
+                  <dd id="infoDevice">—</dd>
+                  <dt>默认音色</dt>
+                  <dd id="infoVoice">—</dd>
+                  <dt>运行时间</dt>
+                  <dd id="infoUptime">—</dd>
+                  <dt>访问前缀</dt>
+                  <dd id="infoPrefix">/</dd>
+                  <dt>结果保留</dt>
+                  <dd id="infoRetention">—</dd>
+                </dl>
+                <div class="mini-note">
+                  API Key
+                  仅在发放时显示完整内容。撤销密钥或停用用户，会同步取消其未完成任务。
+                </div>
+              </article>
+            </div>
+            <article class="panel">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">ACTIVITY</p>
+                  <h2>最近调用</h2>
+                </div>
+                <button data-jump="queue" class="quiet">查看全部 →</button>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>用户</th>
+                      <th>任务号</th>
+                      <th>字符数</th>
+                      <th>状态</th>
+                      <th>提交时间</th>
+                    </tr>
+                  </thead>
+                  <tbody id="recentBody"></tbody>
+                </table>
+              </div>
+            </article>
+          </section>
+          <section id="page-users" class="page">
+            <div class="section-head">
+              <div>
+                <h2>让合适的人，获得合适的额度</h2>
+                <p class="muted">
+                  多把密钥共享所属用户的并发、频率与字符额度。
+                </p>
+              </div>
+              <button class="primary" id="newUserButton">＋ 新增用户</button>
+            </div>
+            <label class="search"
+              ><span>搜索用户或密钥</span
+              ><input
+                type="search"
+                id="userSearch"
+                placeholder="输入名称、标签或密钥前缀"
+            /></label>
+            <article class="panel">
+              <div class="section-head">
+                <h2>可信用户</h2>
+                <span id="userCount" class="tag">0 位</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>用户 / 状态</th>
+                      <th>优先级</th>
+                      <th>并行 / 排队</th>
+                      <th>每分钟</th>
+                      <th>今日字符 / 额度</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="userBody"></tbody>
+                </table>
+              </div>
+            </article>
+            <article class="panel">
+              <div class="section-head">
+                <h2>API Keys</h2>
+                <button id="issueKeyButton">发放密钥</button>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>所属用户 / 标签</th>
+                      <th>密钥前缀</th>
+                      <th>有效期</th>
+                      <th>最近使用</th>
+                      <th>状态</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="keyBody"></tbody>
+                </table>
+              </div>
+            </article>
+          </section>
+          <section id="page-queue" class="page">
+            <div class="section-head">
+              <div>
+                <h2>每个请求，都有迹可循</h2>
+                <p class="muted">
+                  取消运行中的任务后，将在当前推理结束时释放名额。
+                </p>
+              </div>
+              <span class="tag">自动刷新</span>
+            </div>
+            <article class="panel">
+              <h2>进行中的任务</h2>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>用户</th>
+                      <th>音色 / 任务号</th>
+                      <th>优先级</th>
+                      <th>队列位置</th>
+                      <th>状态</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="activeBody"></tbody>
+                </table>
+              </div>
+            </article>
+            <article class="panel">
+              <h2>调用记录</h2>
+              <p class="hint">只记录字符数和状态，不记录合成文本。</p>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>用户</th>
+                      <th>任务号</th>
+                      <th>字符数</th>
+                      <th>状态</th>
+                      <th>提交时间</th>
+                    </tr>
+                  </thead>
+                  <tbody id="historyBody"></tbody>
+                </table>
+              </div>
+            </article>
+          </section>
+          <section id="page-voices" class="page">
+            <div class="voice-layout">
+              <article class="panel">
+                <div class="section-head">
+                  <h2>在线合成</h2>
+                  <span class="tag">管理员试听</span>
+                </div>
+                <form id="synthForm">
+                  <label>选择音色<select id="synthVoice"></select></label
+                  ><label
+                    >合成文本<textarea
+                      id="synthText"
+                      rows="5"
+                      maxlength="4000"
+                      required
+                    >
+你好，欢迎使用 Umeko 语音合成服务。</textarea
+                    >
+                  </label>
+                  <div class="field-grid">
+                    <label
+                      >语言<select id="synthLang">
+                        <option value="zh">中文</option>
+                        <option value="en">英文</option>
+                        <option value="ja">日文</option>
+                        <option value="ko">韩文</option>
+                        <option value="yue">粤语</option>
+                        <option value="auto">自动</option>
+                      </select></label
+                    ><label
+                      >语速<input
+                        id="synthSpeed"
+                        type="number"
+                        value="1"
+                        min="0.5"
+                        max="2"
+                        step="0.1" /></label
+                    ><label
+                      >最长音频（秒）<input
+                        id="synthSeconds"
+                        type="number"
+                        value="10"
+                        min="0.5"
+                        max="60"
+                        step="0.5"
+                    /></label>
+                  </div>
+                  <div class="actions">
+                    <button class="primary" type="submit" id="synthButton">
+                      生成语音 →</button
+                    ><button type="button" id="cancelSynth" class="hidden">
+                      取消任务
+                    </button>
+                  </div>
+                  <p class="hint" id="synthStatus" aria-live="polite">
+                    通过任务接口合成，排队期间可查看状态。
+                  </p>
+                </form>
+                <div id="audioResult" class="hidden">
+                  <audio id="synthAudio" controls></audio
+                  ><a id="audioDownload" download="umeko-tts.wav"
+                    >下载 WAV ↗</a
+                  >
+                </div>
+              </article>
+              <article class="panel">
+                <div class="section-head">
+                  <h2>音色库</h2>
+                  <button id="newVoiceButton">＋ 添加音色</button>
+                </div>
+                <div id="voiceList" class="voice-list"></div>
+              </article>
+            </div>
+          </section>
+          <section id="page-docs" class="page">
+            <article class="panel docs">
+              <span class="tag">API ACCESS</span>
+              <h2>用一个密钥，接入你的应用</h2>
+              <p>
+                向管理员申请 API Key，在请求中发送
+                <code>Authorization: Bearer &lt;API_KEY&gt;</code
+                >。密钥具备所属用户的访问权限和额度。
+              </p>
+              <label
+                >当前服务地址<code id="docBase" class="code-block"></code
+              ></label>
+              <h3>短请求：直接获取音频</h3>
+              <pre id="docSync"></pre>
+              <h3>长任务：提交、查询、下载</h3>
+              <pre id="docAsync"></pre>
+              <p>
+                先提交任务，随后每 1–3 秒查询状态；<code>completed</code> 后通过
+                <code>audio_url</code> 下载。各次请求都需要 API
+                Key。此方式适合通过 ALB 访问与多人排队。
+              </p>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>接口</th>
+                      <th>用途</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>GET /v1/voices</td>
+                      <td>获取可用音色</td>
+                    </tr>
+                    <tr>
+                      <td>GET /v1/me</td>
+                      <td>查看自身额度与限制</td>
+                    </tr>
+                    <tr>
+                      <td>POST /v1/jobs</td>
+                      <td>提交合成任务，返回 202</td>
+                    </tr>
+                    <tr>
+                      <td>GET /v1/jobs/{id}</td>
+                      <td>查询任务状态与队列位置</td>
+                    </tr>
+                    <tr>
+                      <td>GET /v1/jobs/{id}/audio</td>
+                      <td>下载已完成的音频</td>
+                    </tr>
+                    <tr>
+                      <td>DELETE /v1/jobs/{id}</td>
+                      <td>取消自己的任务</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="hint">
+                429 表示频率、额度或排队数量达到上限；503
+                表示排队超时或服务未就绪。失败和取消会释放预留字符额度。任务和音频保存在内存中，重启后失效。
+              </p>
+            </article>
+          </section>
+        </main>
+        <footer>Umeko TTS <span>·</span> 为可信的人，提供可靠的声音。</footer>
       </div>
     </div>
-  </div>
 
-  <!-- 管理令牌弹窗 -->
-  <div class="modal-mask hidden" id="tokenModal">
-    <div class="modal">
-      <div class="modal-title">需要管理令牌</div>
-      <div class="form-row">
-        <label>X-Admin-Token</label>
-        <input type="password" id="tokenInput" placeholder="服务端 TTS_ADMIN_TOKEN 的值">
+    <dialog id="userDialog">
+      <form id="userForm">
+        <div class="section-head">
+          <h2 id="userDialogTitle">新增可信用户</h2>
+          <button type="button" data-close="userDialog" class="quiet">
+            关闭
+          </button>
+        </div>
+        <input id="editUserId" type="hidden" /><label
+          >用户名称<input
+            id="userName"
+            required
+            maxlength="64"
+            autocomplete="off"
+        /></label>
+        <div class="field-grid">
+          <label
+            >优先级（0–10）<input
+              id="userPriority"
+              type="number"
+              min="0"
+              max="10"
+              required
+              value="0" /></label
+          ><label
+            >最多同时合成<input
+              id="userConcurrency"
+              type="number"
+              min="1"
+              max="32"
+              required
+              value="1" /></label
+          ><label
+            >最多排队<input
+              id="userQueue"
+              type="number"
+              min="1"
+              max="100"
+              required
+              value="8" /></label
+          ><label
+            >每分钟请求数<input
+              id="userRpm"
+              type="number"
+              min="1"
+              max="600"
+              required
+              value="30" /></label
+          ><label
+            >每日字符额度（0 为不限）<input
+              id="userDaily"
+              type="number"
+              min="0"
+              max="100000000"
+              required
+              value="100000" /></label
+          ><label
+            >单次字符上限<input
+              id="userTextLimit"
+              type="number"
+              min="1"
+              max="10000"
+              required
+              value="1000"
+          /></label>
+        </div>
+        <label class="check"
+          ><input id="userEnabled" type="checkbox" checked />启用该用户</label
+        >
+        <p class="hint">
+          更高优先级会优先获得空闲名额；等待中的请求会逐步提升优先级。每日字符额度按
+          UTC 日界线结算。
+        </p>
+        <button class="primary wide" type="submit">保存用户</button>
+      </form>
+    </dialog>
+    <dialog id="keyDialog">
+      <form id="keyForm">
+        <div class="section-head">
+          <h2>发放 API Key</h2>
+          <button type="button" data-close="keyDialog" class="quiet">
+            关闭
+          </button>
+        </div>
+        <label>可信用户<select id="keyUser" required></select></label
+        ><label
+          >密钥标签<input
+            id="keyLabel"
+            value="服务调用"
+            maxlength="64"
+            required /></label
+        ><label
+          >有效期（天，0 为不设到期日）<input
+            id="keyDays"
+            type="number"
+            value="30"
+            min="0"
+            max="3650"
+            required /></label
+        ><button type="submit" class="primary wide">生成密钥</button>
+      </form>
+    </dialog>
+    <dialog id="secretDialog">
+      <div class="section-head">
+        <h2>密钥已生成</h2>
+        <button data-close="secretDialog" class="quiet">关闭</button>
       </div>
-      <div class="modal-actions">
-        <button class="btn primary" id="btnTokenSave">保存</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="toast-wrap" id="toastWrap"></div>
-  <script src="app.js"></script>
-</body>
+      <p>请复制并通过可信渠道交给用户。关闭后无法再次查看完整密钥。</p>
+      <label
+        >API Key<textarea
+          id="newSecret"
+          rows="3"
+          readonly
+          spellcheck="false"
+        ></textarea></label
+      ><button id="copySecret" class="primary wide">复制完整密钥</button>
+    </dialog>
+    <dialog id="voiceDialog">
+      <form id="voiceForm">
+        <div class="section-head">
+          <h2 id="voiceDialogTitle">添加音色</h2>
+          <button type="button" data-close="voiceDialog" class="quiet">
+            关闭
+          </button>
+        </div>
+        <input type="hidden" id="editVoiceName" /><label
+          >音色名称<input id="voiceName" maxlength="64" required /></label
+        ><label>简介<input id="voiceDescription" maxlength="1000" /></label
+        ><label
+          >参考文本<textarea
+            id="voiceRefText"
+            rows="2"
+            maxlength="4000"
+          ></textarea></label
+        ><label
+          >参考语言<select id="voiceRefLang">
+            <option value="zh">中文</option>
+            <option value="en">英文</option>
+            <option value="ja">日文</option>
+            <option value="ko">韩文</option>
+            <option value="yue">粤语</option>
+          </select></label
+        ><label
+          >GPT 权重<input
+            type="file"
+            id="voiceGpt"
+            accept=".ckpt,.safetensors" /></label
+        ><label
+          >SoVITS 权重<input
+            type="file"
+            id="voiceSovits"
+            accept=".pth,.ckpt,.safetensors" /></label
+        ><label
+          >参考音频<input
+            type="file"
+            id="voiceAudio"
+            accept=".wav,.mp3,.ogg,.flac,.m4a"
+        /></label>
+        <p class="hint">
+          只上传可信来源的模型权重。正在被任务使用的音色需等待任务结束后再修改。
+        </p>
+        <progress
+          id="voiceProgress"
+          max="100"
+          value="0"
+          class="hidden"
+        ></progress
+        ><button type="submit" class="primary wide" id="voiceSave">
+          保存音色
+        </button>
+      </form>
+    </dialog>
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+  </body>
 </html>

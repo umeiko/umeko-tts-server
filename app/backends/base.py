@@ -29,12 +29,16 @@ class BaseBackend:
     """所有后端返回 (pcm16_bytes, sample_rate)，WAV 封装由引擎统一完成。"""
 
     name = "base"
+    max_concurrency = 1  # A shared model pipeline requires serial inference.
     requires_files = True  # mock 后端不需要权重文件
 
     def startup(self) -> None:
         pass
 
     def shutdown(self) -> None:
+        pass
+
+    def invalidate_cache(self) -> None:
         pass
 
     def synthesize(self, job: SynthesisJob) -> tuple[bytes, int]:

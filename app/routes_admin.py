@@ -2,9 +2,11 @@
 
 若设置了环境变量 TTS_ADMIN_TOKEN，所有管理接口要求请求头 X-Admin-Token。
 """
+
 from __future__ import annotations
 
-import shutil
+import functools
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +16,7 @@ from fastapi.responses import FileResponse
 
 from .errors import ApiError
 from .registry import AUDIO_EXTS, GPT_EXTS, SOVITS_EXTS, VoiceError, VoiceRegistry
+from .security import verify_admin
 
 router = APIRouter(prefix="/api")
 
@@ -22,10 +25,19 @@ _EXTS = {"gpt": GPT_EXTS, "sovits": SOVITS_EXTS, "ref_audio": AUDIO_EXTS}
 _LABEL = {"gpt": "GPT 权重", "sovits": "SoVITS 权重", "ref_audio": "参考音频"}
 
 
-def verify_admin(request: Request):
-    token = request.app.state.settings.admin_token
-    if token and request.headers.get("X-Admin-Token") != token:
-        raise ApiError(401, "未授权：请提供正确的 X-Admin-Token 请求头")
+def voice_mutation(fn):
+    @functools.wraps(fn)
+    async def wrapped(*args, **kwargs):
+        request, name = kwargs["request"], kwargs["name"]
+        engine = request.app.state.engine
+        async with request.app.state.voice_lock:
+            engine.begin_voice_edit(name)
+            try:
+                return await fn(*args, **kwargs)
+            finally:
+                engine.end_voice_edit(name)
+
+    return wrapped
 
 
 def _registry(request: Request) -> VoiceRegistry:
@@ -45,16 +57,26 @@ async def _save_upload(reg: VoiceRegistry, name: str, kind: str, upload: UploadF
         )
     vdir = reg.voice_dir(name)
     vdir.mkdir(parents=True, exist_ok=True)
-    # 同一类文件只保留最新一份
-    for old in vdir.glob(f"{_STEM[kind]}.*"):
-        old.unlink()
     dest = vdir / f"{_STEM[kind]}{ext}"
+    staged = vdir / (".upload-" + uuid.uuid4().hex)
 
     def _copy():
-        with open(dest, "wb") as f:
-            shutil.copyfileobj(upload.file, f, 1024 * 1024 * 4)
+        total = 0
+        with staged.open("wb") as f:
+            for chunk in iter(lambda: upload.file.read(1024 * 1024), b""):
+                total += len(chunk)
+                f.write(chunk)
+        if total == 0:
+            raise ApiError(400, "上传文件不能为空")
+        staged.replace(dest)
+        for old in vdir.glob(f"{_STEM[kind]}.*"):
+            if old != dest:
+                old.unlink()
 
-    await run_in_threadpool(_copy)
+    try:
+        await run_in_threadpool(_copy)
+    finally:
+        staged.unlink(missing_ok=True)
     reg.set_file(name, kind, f"voices/{name}/{dest.name}")
 
 
@@ -66,7 +88,13 @@ async def status(request: Request):
         "engine": st.engine.status(),
         "voices": len(reg.list()),
         "default_voice": reg.default,
-        "admin_auth": bool(st.settings.admin_token),
+        "admin_auth": True,
+        "base_url": st.settings.base_url,
+        "base_path": st.settings.base_path,
+        "limits": {
+            "max_text_chars": st.settings.max_text_chars,
+            "result_ttl": st.settings.result_ttl,
+        },
         "data_dir": str(st.settings.data_dir),
         "gsv_root": str(st.settings.gsv_root),
     }
@@ -79,6 +107,7 @@ async def list_voices(request: Request):
 
 
 @router.post("/voices", dependencies=[Depends(verify_admin)])
+@voice_mutation
 async def create_voice(
     request: Request,
     name: str = Form(...),
@@ -94,13 +123,18 @@ async def create_voice(
         v = reg.create(name.strip(), description, ref_text, ref_lang)
     except VoiceError as e:
         raise ApiError(400, str(e))
-    for kind, up in (("gpt", gpt_file), ("sovits", sovits_file), ("ref_audio", ref_audio)):
+    for kind, up in (
+        ("gpt", gpt_file),
+        ("sovits", sovits_file),
+        ("ref_audio", ref_audio),
+    ):
         if _has_file(up):
             await _save_upload(reg, v.name, kind, up)
     return reg.to_dict(reg.get(v.name))
 
 
 @router.put("/voices/{name}", dependencies=[Depends(verify_admin)])
+@voice_mutation
 async def update_voice(
     request: Request,
     name: str,
@@ -115,13 +149,18 @@ async def update_voice(
     if reg.get(name) is None:
         raise ApiError(404, f"音色「{name}」不存在")
     reg.update_meta(name, description=description, ref_text=ref_text, ref_lang=ref_lang)
-    for kind, up in (("gpt", gpt_file), ("sovits", sovits_file), ("ref_audio", ref_audio)):
+    for kind, up in (
+        ("gpt", gpt_file),
+        ("sovits", sovits_file),
+        ("ref_audio", ref_audio),
+    ):
         if _has_file(up):
             await _save_upload(reg, name, kind, up)
     return reg.to_dict(reg.get(name))
 
 
 @router.delete("/voices/{name}", dependencies=[Depends(verify_admin)])
+@voice_mutation
 async def delete_voice(request: Request, name: str):
     reg = _registry(request)
     try:
