@@ -120,6 +120,46 @@ curl -X DELETE "$BASE/v1/jobs/<id>" -H "Authorization: Bearer $UMEKO_TTS_API_KEY
 429 表示用户频率、额度或排队上限；排队数量/频率限制包含 `Retry-After`。
 503 表示服务未就绪、正在停止或排队超时。400/401/403/404 分别表示输入、凭证、权限/CSRF、资源问题。
 
+### 指定音色
+
+先查询当前可用音色，取返回数组中完整的 `name`（包括英文大小写）；`is_default: true` 标记默认音色。
+中文名称直接放在 JSON 里，无需 URL 编码。下列 Bash 示例中的“播音女声”需替换为实际返回的名称。
+
+```bash
+curl "$BASE/v1/voices" -H "Authorization: Bearer $UMEKO_TTS_API_KEY"
+curl "$BASE/tts" \
+  -H "Authorization: Bearer $UMEKO_TTS_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"voice":"播音女声","text":"你好，这是指定音色的测试。","text_lang":"zh","speed_factor":1.0}' \
+  -o output.wav
+# 异步提交时使用完全相同的 voice 字段。
+curl "$BASE/v1/jobs" \
+  -H "Authorization: Bearer $UMEKO_TTS_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"voice":"播音女声","text":"这是一段异步合成的文本。"}'
+```
+
+省略 `voice` 或传 `null` 使用管理员设置的默认音色；`text_lang` 和 `speed_factor` 分别控制语言和语速，不选择音色。
+`voice` 接受名称，不接受本机权重路径。不存在的名称返回 404，文件未准备好的音色返回 400；`/v1/voices` 只列出可用音色。
+网页“接入文档”可选择当前音色，自动更新带实际服务前缀的两种 curl 示例。
+
+### 进度与管理员错误详情
+
+- `GET /v1/jobs/{id}` 增加 `progress`、`elapsed_seconds`（含排队）和 `run_seconds`（推理开始后）。
+  `progress.stage` 区分 `queued`、`starting`、`loading_model`、`synthesizing`、`encoding` 和最终状态。
+- `segments_completed` / `segments_total` 是引擎实际分段计数，`segment` 是当前段号；
+  使用 `cut_punc`（例如 `。！？`）指定外层切分时，多段任务提供 `segment_percent`。
+  默认模型内部自动切分没有暴露逐步进度，单段时该百分比为 `null`，网页显示进行中动画，不能据此估计剩余时间。
+  `output_seconds` 是已生成音频时长，`truncated` 表示是否达到输出时长限制而提前结束。
+- 管理员在“调用记录”或总览的最近记录点击任务号展开；详情包含音色、时间、原始异常类型和 Python 异常链，可复制报错。
+  自动刷新保留展开状态。`GET /api/requests/{id}` 按需读取详情，轮询列表不携带大段异常栈。
+- 异常栈保存到 SQLite，随记录保留 30 天，音频过期或服务重启后仍能查看；升级自动创建诊断表，旧记录无法补回当时未保存的错误。
+  只对管理员开放，普通 API Key 即使属于任务创建者也不能读取；普通合成接口仍返回通用错误与任务号。
+- 诊断保留异常链、源码位置和异常消息，不采集 Python 局部变量、请求头或整个进程输出；
+  自动遮蔽本服务管理员令牌和匹配格式的 API Key，单条异常栈限制为约 64K 字符。
+  第三方异常消息可能包含路径或其自行打印的输入内容，应按管理员诊断资料管理。
+  GPT-SoVITS 非流式生成器会被完整消费，以捕获“先返回静音、后抛异常”的失败并完成模型清理。
+
 ## 调度与资源边界
 
 - 全局并行数与每用户并行数分别限制，同时满足才分配推理名额。
@@ -142,7 +182,7 @@ curl -X DELETE "$BASE/v1/jobs/<id>" -H "Authorization: Bearer $UMEKO_TTS_API_KEY
 
 - 用户、Key 摘要、会话摘要、调用计数、额度和调度配置保存在 `TTS_DATA_DIR/access.sqlite3`；Unix 数据库权限为 0600。
 - 密钥原文只存在于创建响应；不要把它放入 URL、工单、截图或日志。通过环境变量给客户端传递。
-- 调用历史保存 30 天，只主动记录任务号、用户、密钥 ID、字符数和状态，不保存输入正文或输出音频。管理员操作审计最多保留 2000 条。
+- 调用历史与管理员诊断保存 30 天，记录任务号、用户、密钥 ID、字符数、音色、时间、状态及捕获的异常；不主动保存输入正文或输出音频。第三方异常消息可能包含其自行附带的输入内容。管理员操作审计最多保留 2000 条。
 - 上游模型库可能自行打印推理内容，部署者应控制进程日志的访问与保留策略。
 - 停止服务后可备份整个数据目录。运行中备份 SQLite 请使用 SQLite backup API，不能只复制 `.sqlite3` 而遗漏 WAL。
 - `/healthz` 供源站健康检查使用，不要求登录，不返回密钥、用户或本机路径。ALB 可配置内部 `/healthz` 或带公开前缀的路径。

@@ -171,6 +171,11 @@ async def cancel_job(request: Request, job_id: str):
     return engine.job_info(engine.cancel_job(job_id), admin=True)
 
 
+@router.get("/requests/{request_id}", dependencies=[Depends(verify_admin)])
+async def request_detail(request: Request, request_id: str):
+    return request.app.state.engine.request_detail(request_id)
+
+
 @router.put("/settings", dependencies=[Depends(verify_admin)])
 async def settings(request: Request, body: QueueConfig):
     request.app.state.engine.configure(body.model_dump())

@@ -1,7 +1,9 @@
 """推理后端接口定义。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 
 class BackendError(Exception):
@@ -23,6 +25,11 @@ class SynthesisJob:
     ref_audio_path: str = ""
     ref_text: str = ""
     ref_lang: str = "zh"
+    on_progress: Callable[[str], None] | None = None
+
+    def report_progress(self, stage: str) -> None:
+        if self.on_progress:
+            self.on_progress(stage)
 
 
 class BaseBackend:

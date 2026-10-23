@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
 import sqlite3
 import threading
 import time
+import traceback
 import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor
@@ -46,6 +48,18 @@ class Job:
     meta: dict = field(default_factory=dict)
     error: str = ""
     error_status: int = 500
+    error_type: str = ""
+    error_traceback: str = ""
+    progress: dict = field(
+        default_factory=lambda: {
+            "stage": "queued",
+            "segments_completed": 0,
+            "segments_total": 0,
+            "segment": 0,
+            "output_seconds": 0,
+            "truncated": False,
+        }
+    )
 
 
 class TTSEngine:
@@ -112,7 +126,7 @@ class TTSEngine:
         if sum(j.principal.user_id == p.user_id for j in queued) >= p.max_queue:
             raise QueueFullError("该用户的排队请求数已达上限")
         jid = uuid.uuid4().hex
-        p = self.store.reserve(jid, p, len(params.text))
+        p = self.store.reserve(jid, p, len(params.text), voice.name)
         # No yield between admission, quota reservation and queue insertion.
         job = Job(
             jid,
@@ -180,17 +194,37 @@ class TTSEngine:
     async def _dispatch(self):
         try:
             await self._dispatch_loop()
-        except Exception:
-            self._unavailable()
+        except Exception as exc:
+            self._unavailable(exc=exc)
 
-    def _unavailable(self, exclude=None):
+    def _capture_error(self, job: Job, exc: Exception):
+        # No locals, request bodies, headers or process-wide stdout capture.
+        detail = "".join(
+            traceback.TracebackException.from_exception(
+                exc, capture_locals=False
+            ).format()
+        )
+        if self.settings.admin_token:
+            detail = detail.replace(self.settings.admin_token, "[REDACTED_ADMIN_TOKEN]")
+        detail = re.sub(r"utts_[A-Za-z0-9_-]{20,}", "[REDACTED_API_KEY]", detail)
+        if job.error_traceback:
+            detail = job.error_traceback + "\n\n--- 状态持久化异常 ---\n" + detail
+        if len(detail) > 65536:
+            detail = detail[:8192] + "\n[中间内容因长度限制省略]\n" + detail[-57000:]
+        job.error_type = type(exc).__module__ + "." + type(exc).__qualname__
+        job.error_traceback = detail
+
+    def _unavailable(self, exclude=None, exc=None):
         logger.exception("Scheduler control state unavailable; rejecting new work")
         self._closed = True
         self._event.set()
         for job in self.jobs.values():
             if job.state == "queued" and job.id != exclude:
+                if exc is not None:
+                    self._capture_error(job, exc)
                 job.state, job.error_status = "failed", 503
                 job.error, job.finished = "调度服务不可用，请稍后重试", time.time()
+                self._progress(job, stage="failed")
                 job.params = None
                 self._counts["failed"] += 1
                 if not job.done.done():
@@ -221,6 +255,7 @@ class TTSEngine:
                 if job is None:
                     break
                 job.state, job.started = "running", time.time()
+                self._progress(job, stage="starting")
                 self._running[job.id] = job
                 task = asyncio.create_task(self._execute(job), name="tts-" + job.id)
                 self._tasks.add(task)
@@ -250,8 +285,9 @@ class TTSEngine:
                     "ms": round((time.time() - job.created) * 1000, 1),
                 }
                 self._finish(job, "completed")
-        except Exception:
+        except Exception as exc:
             logger.exception("Inference failed for request %s", job.id)
+            self._capture_error(job, exc)
             self._finish(
                 job, "failed", f"语音合成失败，请联系管理员，任务号：{job.id}", 500
             )
@@ -263,11 +299,25 @@ class TTSEngine:
     def _finish(self, job: Job, state: str, error="", status=500):
         if job.state in TERMINAL:
             return
+        self._progress(job, stage=state)
         try:
-            self.store.finish(job.id, state)
-        except sqlite3.Error:
-            self._unavailable(exclude=job.id)
+            self.store.finish(
+                job.id,
+                state,
+                {
+                    "voice": job.voice.name,
+                    "started": job.started,
+                    "error": error,
+                    "error_type": job.error_type,
+                    "traceback": job.error_traceback,
+                    "progress": self._progress_info(job),
+                },
+            )
+        except sqlite3.Error as exc:
+            self._capture_error(job, exc)
+            self._unavailable(exclude=job.id, exc=exc)
             state, error, status = "failed", "状态存储不可用，请稍后重试", 503
+            self._progress(job, stage=state)
         job.state, job.error, job.error_status, job.finished = (
             state,
             error,
@@ -336,6 +386,13 @@ class TTSEngine:
             "finished": job.finished,
             "position": waiting.index(job) + 1 if job in waiting else None,
             "error": job.error,
+            "progress": self._progress_info(job),
+            "elapsed_seconds": round(
+                max(0, (job.finished or time.time()) - job.created), 1
+            ),
+            "run_seconds": round(max(0, (job.finished or time.time()) - job.started), 1)
+            if job.started
+            else 0,
             "expires": job.finished + self.settings.result_ttl
             if job.finished
             else None,
@@ -346,7 +403,45 @@ class TTSEngine:
                 user_name=job.principal.name,
                 key_id=job.principal.key_id,
                 priority=job.principal.priority,
+                error_type=job.error_type,
+                has_traceback=bool(job.error_traceback),
             )
+        return result
+
+    @staticmethod
+    def _progress(job: Job, **values):
+        # Worker updates replace the snapshot; readers never observe partial fields.
+        job.progress = {**job.progress, **values}
+
+    @staticmethod
+    def _progress_info(job: Job):
+        result = dict(job.progress)
+        total = result["segments_total"]
+        result["segment_percent"] = (
+            round(100 * result["segments_completed"] / total) if total > 1 else None
+        )
+        return result
+
+    def request_detail(self, request_id: str):
+        result = self.store.request_detail(request_id)
+        job = self.jobs.get(request_id)
+        if job:
+            result.update(self.job_info(job, admin=True))
+            result.update(traceback=job.error_traceback, diagnostics_available=True)
+        else:
+            result["elapsed_seconds"] = round(
+                max(0, (result["finished"] or time.time()) - result["created"]), 1
+            )
+            result["run_seconds"] = (
+                round(
+                    max(0, (result["finished"] or time.time()) - result["started"]), 1
+                )
+                if result["started"]
+                else 0
+            )
+            if result["state"] == "interrupted":
+                result["error"] = "服务重启，任务已中断；内存任务和音频无法恢复"
+                result["progress"] = {**result["progress"], "stage": "interrupted"}
         return result
 
     def queue(self):
@@ -391,15 +486,27 @@ class TTSEngine:
     def _run(self, job: Job) -> bytes:
         params, voice = job.params, job.voice
         pcm, sr = bytearray(), 0
-        for seg in self._split_text(params.text, params.cut_punc):
+        segments = self._split_text(params.text, params.cut_punc)
+        self._progress(job, segments_total=len(segments))
+        for index, seg in enumerate(segments, 1):
             if job.cancel.is_set():
                 break
-            chunk, sr = self.backend.synthesize(self._build_job(voice, params, seg))
+            self._progress(job, stage="synthesizing", segment=index)
+            task = self._build_job(voice, params, seg)
+            task.on_progress = lambda stage: self._progress(job, stage=stage)
+            chunk, sr = self.backend.synthesize(task)
             pcm += chunk
             limit = int(params.max_sec * sr) * 2
+            self._progress(
+                job,
+                segments_completed=index,
+                output_seconds=round(min(len(pcm), limit) / (sr * 2), 2),
+            )
             if len(pcm) >= limit:
+                self._progress(job, truncated=True)
                 del pcm[limit:]
                 break
+        self._progress(job, stage="encoding")
         buf = io.BytesIO()
         with wave.open(buf, "wb") as w:
             w.setnchannels(1)

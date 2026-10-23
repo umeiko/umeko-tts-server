@@ -14,7 +14,7 @@ A text-to-speech service and admin console built on [GPT-SoVITS](https://github.
 - **Trusted-user access**: hashed API keys, user policies, expiry, rotation and revocation; browser admin sessions with CSRF protection
 - **Bounded scheduling**: global/per-user concurrency and queues, request/character quotas, priority with waiting-time aging
 - **Long jobs**: submit, poll, download and cancel asynchronous jobs behind an ALB
-- **Web console**: voice management, online audition, live queue status, API docs — pure static pages, no build step
+- **Web console**: voice management, online audition, task stages/segment progress, expandable admin-only error tracebacks, and API docs with voice selection — pure static pages, no build step
 - **Prebuilt voice packs**: one-command install from GitHub Release (`scripts/download_voices.py`)
 
 ## Requirements
@@ -280,5 +280,7 @@ umeko-tts-server/
 
 - Configure a random `TTS_ADMIN_TOKEN`, HTTPS `UMEKO_TTS_BASE_URL`, trusted proxy IPs and private origin access; see [deployment](docs/deployment.md).
 - Use asynchronous jobs for long requests behind an ALB. `max_sec` caps output duration, not the runtime of an individual model call.
+- Set `voice` to the exact `name` returned by authenticated `GET /v1/voices` in either `/tts` or `/v1/jobs`; omit it to use the default voice. The console's API docs generate both examples for your selected voice. See [voice selection, progress and diagnostics](docs/deployment.md#指定音色).
+- Job status exposes actual stages/segment counts; single-segment inference has no internal percentage. Admin-only request details retain captured Python exception chains for 30 days, including across restarts; older records cannot recover traces that were never saved.
 - On Windows, this project monkey-patches `torchaudio.load` with a soundfile implementation (`app/backends/gsv.py`), so no FFmpeg DLLs are needed for torchaudio ≥ 2.9
 - To publish your own voice packs: `$PY scripts/pack_voices.py`

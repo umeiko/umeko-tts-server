@@ -16,6 +16,9 @@ const state = {
   refreshing: false,
   synthJob: null,
   audioUrl: null,
+  expandedRequests: new Set(),
+  requestDetails: new Map(),
+  loadingDetails: new Set(),
 };
 const states = {
   queued: "排队中",
@@ -71,6 +74,16 @@ function signedOut() {
   state.keys = [];
   state.voices = [];
   state.synthJob = null;
+  state.expandedRequests.clear();
+  state.requestDetails.clear();
+  state.loadingDetails.clear();
+  state.queue = { jobs: [], history: [] };
+  $("#historyBody").replaceChildren();
+  $("#recentBody").replaceChildren();
+  $("#activeBody").replaceChildren();
+  delete $("#historyBody").dataset.rendered;
+  delete $("#recentBody").dataset.rendered;
+  $("#synthProgress").replaceChildren();
   $("#appView").classList.add("hidden");
   $("#loginView").classList.remove("hidden");
   $$("dialog[open]").forEach((d) => d.close());
@@ -163,12 +176,77 @@ function renderStatus() {
     state.settingsLoaded = true;
   }
 }
+function progressMarkup(job) {
+  const p = job.progress || {};
+  const terminal = [
+    "completed",
+    "failed",
+    "cancelled",
+    "expired",
+    "interrupted",
+  ].includes(job.state);
+  const stage =
+    terminal || job.state === "cancelling" ? job.state : p.stage || job.state;
+  let label =
+    {
+      queued: "等待推理名额",
+      starting: "准备合成",
+      loading_model: "正在加载音色模型",
+      synthesizing: "正在合成",
+      encoding: "封装 WAV 音频",
+      cancelling: "正在取消，等待当前推理结束",
+      ...states,
+    }[stage] || stage;
+  if (stage === "queued" && job.position)
+    label += ` · 前方 ${job.position - 1} 个排队任务`;
+  if (stage === "synthesizing" && p.segment)
+    label += ` · 第 ${p.segment}/${p.segments_total} 段`;
+  if (job.state === "completed" && p.truncated) label += " · 已达音频时长上限";
+  const total = terminal ? 1 : p.segments_total;
+  const value = terminal
+    ? job.state === "completed"
+      ? 1
+      : 0
+    : p.segments_completed;
+  const determinate = terminal || (total > 1 && stage !== "loading_model");
+  const hint =
+    !terminal && total > 1
+      ? `已完成 ${p.segments_completed}/${total} 段（分段进度 ${p.segment_percent}%）`
+      : !terminal
+        ? "单段推理暂不提供内部百分比"
+        : p.output_seconds
+          ? `音频 ${p.output_seconds} 秒`
+          : "";
+  return `<div class="job-progress ${terminal && job.state !== "completed" ? "stopped" : ""}">
+    <div class="progress-label"><span>${esc(label)}</span><small>已用 ${Number(job.elapsed_seconds || 0).toFixed(1)} 秒</small></div>
+    <progress aria-label="合成进度" aria-valuetext="${esc(label)}" max="${determinate ? total || 1 : 1}"${determinate ? ` value="${value || 0}"` : ""}></progress>
+    ${hint ? `<small class="hint">${esc(hint)}</small>` : ""}</div>`;
+}
+function requestDetailMarkup(id) {
+  const d = state.requestDetails.get(id);
+  if (!d) return '<p class="hint" role="status">正在读取调用详情…</p>';
+  if (d.load_error)
+    return `<p class="error-text">${esc(d.load_error)}，收起后可重新展开。</p>`;
+  return `<div class="request-meta">
+    <span>任务号<code>${esc(id)}</code></span><span>音色<strong>${esc(d.voice || "旧记录未保存")}</strong></span>
+    <span>开始时间<strong>${d.started ? esc(date(d.started)) : "尚未开始"}</strong></span>
+    <span>结束时间<strong>${d.finished ? esc(date(d.finished)) : "尚未结束"}</strong></span></div>
+    ${progressMarkup(d)}${d.error ? `<p class="error-text">${esc(d.error)}</p>` : ""}
+    ${
+      d.traceback
+        ? `<div class="trace-heading"><strong>原始异常 · ${esc(d.error_type)}</strong>${action("copy-error", id, "复制报错")}</div><pre class="error-trace" tabindex="0">${esc(d.traceback)}</pre>`
+        : `<p class="hint">${!d.diagnostics_available ? "此记录生成于诊断功能启用前，没有保存原始报错。" : d.state === "interrupted" ? "服务重启中断了任务，没有可捕获的 Python 异常栈。" : "没有捕获到 Python 异常栈。"}</p>`
+    }`;
+}
 function historyRows(rows) {
   return (
     rows
       .map(
         (j) =>
-          `<tr><td>${esc(j.user_name)}</td><td><code title="${esc(j.id)}">${j.id.slice(0, 10)}</code></td><td>${fmt(j.chars)}</td><td>${status(j.state)}</td><td>${esc(date(j.created))}</td></tr>`,
+          `<tr><td>${esc(j.user_name)}</td><td><button class="request-toggle" data-action="toggle-request" data-id="${esc(j.id)}" aria-expanded="${state.expandedRequests.has(j.id)}"><span aria-hidden="true">${state.expandedRequests.has(j.id) ? "▾" : "▸"}</span> <code title="${esc(j.id)}">${j.id.slice(0, 10)}</code> · ${state.expandedRequests.has(j.id) ? "收起" : "展开"}</button></td><td>${fmt(j.chars)}</td><td>${status(j.state)}${j.has_traceback ? '<small class="error-text">可查看原始异常</small>' : ""}</td><td>${esc(date(j.created))}</td></tr>` +
+          (state.expandedRequests.has(j.id)
+            ? `<tr class="request-detail-row" data-request-id="${esc(j.id)}"><td colspan="5"><section class="request-detail">${requestDetailMarkup(j.id)}</section></td></tr>`
+            : ""),
       )
       .join("") || empty(5, "还没有调用记录")
   );
@@ -178,11 +256,44 @@ function renderQueue() {
     state.queue.jobs
       .map(
         (j) =>
-          `<tr><td>${esc(j.user_name)}</td><td>${esc(j.voice)}<small>${j.id.slice(0, 10)}</small></td><td>${j.priority}</td><td>${j.position || "—"}</td><td>${status(j.state)}</td><td>${action("cancel-job", j.id, "取消任务", true)}</td></tr>`,
+          `<tr><td>${esc(j.user_name)}</td><td>${esc(j.voice)}<small>${j.id.slice(0, 10)}</small></td><td>${j.priority}</td><td>${j.position || "—"}</td><td>${status(j.state)}${progressMarkup(j)}</td><td>${action("cancel-job", j.id, "取消任务", true)}</td></tr>`,
       )
       .join("") || empty(6, "队列空闲，等待新的声音");
-  $("#historyBody").innerHTML = historyRows(state.queue.history);
-  $("#recentBody").innerHTML = historyRows(state.queue.history.slice(0, 6));
+  for (const [selector, rows] of [
+    ["#historyBody", state.queue.history],
+    ["#recentBody", state.queue.history.slice(0, 6)],
+  ]) {
+    const body = $(selector);
+    // Avoid replacing an unchanged traceback while an administrator reads/selects it.
+    const html = historyRows(rows);
+    if (body.dataset.rendered !== html) {
+      const positions = new Map(
+        $$(".request-detail-row", body).map((row) => [
+          row.dataset.requestId,
+          $("pre", row)?.scrollTop || 0,
+        ]),
+      );
+      body.innerHTML = html;
+      body.dataset.rendered = html;
+      $$(".request-detail-row", body).forEach((row) => {
+        const pre = $("pre", row);
+        if (pre) pre.scrollTop = positions.get(row.dataset.requestId) || 0;
+      });
+    }
+  }
+}
+async function loadRequestDetail(id) {
+  if (state.loadingDetails.has(id)) return;
+  state.loadingDetails.add(id);
+  try {
+    const detail = await api(`/api/requests/${encodeURIComponent(id)}`);
+    if (state.loggedIn) state.requestDetails.set(id, detail);
+  } catch (e) {
+    if (state.loggedIn) state.requestDetails.set(id, { load_error: e.message });
+  } finally {
+    state.loadingDetails.delete(id);
+    if (state.loggedIn) renderQueue();
+  }
 }
 function renderUsers() {
   const query = $("#userSearch").value.trim().toLowerCase();
@@ -235,6 +346,7 @@ function renderVoices() {
           `<div class="voice-card"><div class="section-head"><h3>${esc(v.name)}</h3><span class="tag">${v.is_default ? "默认音色" : v.is_complete ? "已就绪" : "待补齐文件"}</span></div><p>${esc(v.description || "暂无简介")}</p><div class="actions">${action("edit-voice", v.name, "编辑")}${v.has_ref_audio ? action("play-ref", v.name, "参考试听") : ""}${!v.is_default ? action("default-voice", v.name, "设为默认") : ""}${action("delete-voice", v.name, "删除", true)}</div></div>`,
       )
       .join("") || '<div class="empty">添加音色后即可在线合成</div>';
+  fillDocs();
 }
 async function refresh(voices = false) {
   if (!state.loggedIn || state.refreshing) return;
@@ -252,6 +364,20 @@ async function refresh(voices = false) {
     renderStatus();
     renderUsers();
     renderQueue();
+    for (const id of state.expandedRequests) {
+      const detail = state.requestDetails.get(id);
+      const row = state.queue.history.find((r) => r.id === id);
+      if (
+        !detail ||
+        (!detail.load_error &&
+          (["queued", "running", "cancelling", "pending"].includes(
+            detail.state,
+          ) ||
+            (row && row.state !== detail.state)))
+      ) {
+        void loadRequestDetail(id);
+      }
+    }
   } catch (e) {
     $("#connectionBadge").textContent = "连接暂不可用";
     errorMessage(e);
@@ -353,6 +479,7 @@ async function playAudio(path) {
 async function synthesize(e) {
   e.preventDefault();
   $("#synthButton").disabled = true;
+  $("#synthProgress").replaceChildren();
   try {
     const job = await api("/v1/jobs", {
       method: "POST",
@@ -368,6 +495,7 @@ async function synthesize(e) {
     $("#cancelSynth").classList.remove("hidden");
     while (state.synthJob === job.id && state.loggedIn) {
       const current = await api(`/v1/jobs/${job.id}`);
+      $("#synthProgress").innerHTML = progressMarkup(current);
       $("#synthStatus").textContent =
         (states[current.state] || current.state) +
         (current.position ? ` · 队列位置 ${current.position}` : "");
@@ -417,12 +545,53 @@ function fillDocs() {
     ? configuredBase
     : location.origin + prefix;
   $("#docBase").textContent = base;
+  const selected = $("#docVoice").value;
+  const ready = state.voices.filter(
+    (v) => v.is_complete || state.status?.engine.backend.demo,
+  );
+  $("#docVoice").innerHTML = ready.length
+    ? ready
+        .map(
+          (v) =>
+            `<option value="${esc(v.name)}">${esc(v.name)}${v.is_default ? "（默认）" : ""}</option>`,
+        )
+        .join("")
+    : '<option value="播音女声">播音女声（示例，请替换为实际音色名）</option>';
+  if (ready.some((v) => v.name === selected)) $("#docVoice").value = selected;
+  const voice = $("#docVoice").value;
+  const body = JSON.stringify({
+    voice,
+    text: "你好，欢迎使用语音合成。",
+    text_lang: "zh",
+    speed_factor: 1.0,
+    max_sec: 10,
+  });
+  $("#docVoices").textContent =
+    `curl '${base}/v1/voices' \\\n  -H "Authorization: Bearer $UMEKO_TTS_API_KEY"\n\n# 复制返回数组中的 name 作为 voice，例如："${voice}"`;
   $("#docSync").textContent =
-    `curl -X POST '${base}/tts' \\\n  -H "Authorization: Bearer $UMEKO_TTS_API_KEY" \\\n  -H 'Content-Type: application/json' \\\n  -d '{"text":"你好世界","max_sec":10}' -o output.wav`;
+    `curl -X POST '${base}/tts' \\\n  -H "Authorization: Bearer $UMEKO_TTS_API_KEY" \\\n  -H 'Content-Type: application/json' \\\n  -d '${body}' -o output.wav`;
   $("#docAsync").textContent =
-    `# 1. 提交任务，保存返回的 id\ncurl -X POST '${base}/v1/jobs' \\\n  -H "Authorization: Bearer $UMEKO_TTS_API_KEY" \\\n  -H 'Content-Type: application/json' \\\n  -d '{"text":"这是一段需要排队合成的文本。"}'\n\n# 2. 查询状态\ncurl '${base}/v1/jobs/<id>' \\\n  -H "Authorization: Bearer $UMEKO_TTS_API_KEY"\n\n# 3. completed 后下载\ncurl '${base}/v1/jobs/<id>/audio' \\\n  -H "Authorization: Bearer $UMEKO_TTS_API_KEY" -o output.wav`;
+    `# 1. 指定 voice 并提交任务，保存返回的 id\ncurl -X POST '${base}/v1/jobs' \\\n  -H "Authorization: Bearer $UMEKO_TTS_API_KEY" \\\n  -H 'Content-Type: application/json' \\\n  -d '${body}'\n\n# 2. 查询状态、队列位置和 progress\ncurl '${base}/v1/jobs/<id>' \\\n  -H "Authorization: Bearer $UMEKO_TTS_API_KEY"\n\n# 3. completed 后下载\ncurl '${base}/v1/jobs/<id>/audio' \\\n  -H "Authorization: Bearer $UMEKO_TTS_API_KEY" -o output.wav`;
 }
+$("#docVoice").addEventListener("change", fillDocs);
 async function performAction(name, id) {
+  if (name === "toggle-request") {
+    if (state.expandedRequests.has(id)) state.expandedRequests.delete(id);
+    else {
+      state.expandedRequests.add(id);
+      state.requestDetails.delete(id);
+    }
+    renderQueue();
+    if (state.expandedRequests.has(id)) await loadRequestDetail(id);
+    return;
+  }
+  if (name === "copy-error") {
+    await navigator.clipboard.writeText(
+      state.requestDetails.get(id)?.traceback || "",
+    );
+    toast("报错已复制");
+    return;
+  }
   if (name === "edit-user") return editUser(id);
   if (name === "issue-key") return issueKey(id);
   if (name === "edit-voice") return editVoice(id);

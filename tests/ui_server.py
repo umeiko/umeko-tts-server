@@ -10,13 +10,34 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
 import threading
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.config import Settings
 from app.main import create_app
+from app.backends.mock import MockBackend
 
 PREFIX = "/services/umeko/tts"
 TOKEN = "local-browser-test-" + "x" * 32
+
+
+class BrowserBackend(MockBackend):
+    def __init__(self):
+        self.progress_gate = threading.Event()
+
+    def synthesize(self, job):
+        job.report_progress("loading_model")
+        time.sleep(0.05)
+        job.report_progress("synthesizing")
+        if job.text == "fixture-failure":
+            raise RuntimeError(
+                'Synthetic model failure <img src=x onerror="window.traceInjected=true">'
+            )
+        if job.text.startswith("fixture-hold"):
+            self.progress_gate.clear()
+            if not self.progress_gate.wait(30):
+                raise RuntimeError("browser progress fixture was not released")
+        return super().synthesize(job)
 
 
 def proxy_handler(port, strip):
@@ -72,7 +93,14 @@ if __name__ == "__main__":
         base_url=PREFIX,
         workers=4,
     )
-    app = create_app(settings)
+    backend = BrowserBackend()
+    app = create_app(settings, backend)
+
+    @app.post("/api/test/release-progress")
+    async def release_progress():
+        backend.progress_gate.set()
+        return {"released": True}
+
     if not app.state.registry.get("Demo_Voice"):
         app.state.registry.create(
             "Demo_Voice", description="Synthetic browser test fixture"

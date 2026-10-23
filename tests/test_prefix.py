@@ -64,6 +64,11 @@ def test_proxy_paths_assets_cookies_api_and_job_urls(tmp_path, prefix, strip):
         assert job.status_code == 202
         assert job.headers["location"].startswith(prefix + "/v1/jobs/")
         assert c.get(upstream(job.json()["status_url"]), headers=key).status_code == 200
+        detail_url = upstream(prefix + "/api/requests/" + job.json()["id"])
+        detail = c.get(detail_url, headers=h)
+        assert detail.status_code == 200 and "stage" in detail.json()["progress"]
+        # Strip the session explicitly: an ordinary API key cannot read diagnostics.
+        assert c.get(detail_url, headers={"Cookie": "", **key}).status_code == 401
         assert c.get(upstream(prefix + "/api/openapi"), headers=h).json()[
             "servers"
         ] == [{"url": settings.base_url}]

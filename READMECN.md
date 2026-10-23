@@ -204,6 +204,15 @@ $env:TTS_BACKEND="gsv"; $env:GSV_DEVICE="auto"; & .venv/Scripts/python.exe -m ap
 - 成功 (200)：`audio/wav` 二进制，响应头附带 `X-Voice`（URL 编码的音色名）与 `X-Inference-Ms`
 - 失败 (4xx/5xx)：`{"message": "错误描述"}`
 
+指定音色：先携带 API Key 请求 `GET /v1/voices`，将返回数组中完整的 `name` 填入请求 JSON 的 `voice`，中文名称可直接使用。
+`POST /tts` 与 `POST /v1/jobs` 都支持此字段，省略或传 `null` 时使用默认音色。
+例如 `{"voice":"播音女声","text":"你好"}`，其中名称需替换为实际查询结果；不存在返回 404，文件未齐返回 400。
+网页“接入文档”可选择当前可用音色，自动生成同步/异步 curl 示例；完整示例见[指定音色](docs/deployment.md#指定音色)。
+
+任务状态接口新增真实阶段、已用时间与分段完成数；单段模型推理没有内部百分比，网页显示进行中动画。
+管理员可展开调用记录查看并复制原始 Python 异常链，诊断随记录保留 30 天，重启后仍可查看；普通 API Key 无权读取。
+旧记录无法补回未采集的错误。细节见[进度与错误详情](docs/deployment.md#进度与管理员错误详情)。
+
 ```bash
 # 最小调用
 curl -X POST http://127.0.0.1:9880/tts \

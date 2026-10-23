@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
 import sqlite3
@@ -85,6 +86,12 @@ class AccessStore:
             );
             CREATE INDEX IF NOT EXISTS request_rate ON requests(user_id,created);
             CREATE INDEX IF NOT EXISTS request_time ON requests(created);
+            CREATE TABLE IF NOT EXISTS request_diagnostics (
+                request_id TEXT PRIMARY KEY REFERENCES requests(id) ON DELETE CASCADE,
+                voice TEXT NOT NULL DEFAULT '', started REAL,
+                error TEXT NOT NULL DEFAULT '', error_type TEXT NOT NULL DEFAULT '',
+                traceback TEXT NOT NULL DEFAULT '', progress TEXT NOT NULL DEFAULT '{}'
+            );
             CREATE TABLE IF NOT EXISTS service_config (id INTEGER PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, at REAL NOT NULL,
                 action TEXT NOT NULL, target TEXT NOT NULL);
@@ -281,7 +288,7 @@ class AccessStore:
             self._audit(db, "key.rotate", key_id)
             return result
 
-    def reserve(self, request_id: str, principal: Principal, chars: int):
+    def reserve(self, request_id: str, principal: Principal, chars: int, voice=""):
         now, day = time.time(), quota_day()
         with self.tx() as db:
             p = self._policy(db, principal.user_id, principal.key_id)
@@ -315,6 +322,10 @@ class AccessStore:
                 "INSERT INTO requests VALUES(?,?,?,?,?,?,?,NULL)",
                 (request_id, p.user_id, p.key_id, day, chars, "pending", now),
             )
+            db.execute(
+                "INSERT INTO request_diagnostics(request_id,voice) VALUES(?,?)",
+                (request_id, voice),
+            )
             if p.key_id:
                 db.execute(
                     "UPDATE api_keys SET last_used=? WHERE id=?", (now, p.key_id)
@@ -325,7 +336,7 @@ class AccessStore:
             )
             return p
 
-    def finish(self, request_id: str, outcome: str):
+    def finish(self, request_id: str, outcome: str, details=None):
         with self.tx() as db:
             row = db.execute(
                 "SELECT * FROM requests WHERE id=? AND state='pending'", (request_id,)
@@ -345,6 +356,24 @@ class AccessStore:
                 "UPDATE requests SET state=?,finished=? WHERE id=?",
                 (outcome, time.time(), request_id),
             )
+            if details is not None:
+                db.execute(
+                    """INSERT INTO request_diagnostics
+                    (request_id,voice,started,error,error_type,traceback,progress)
+                    VALUES(?,?,?,?,?,?,?) ON CONFLICT(request_id) DO UPDATE SET
+                    voice=excluded.voice,started=excluded.started,error=excluded.error,
+                    error_type=excluded.error_type,traceback=excluded.traceback,
+                    progress=excluded.progress""",
+                    (
+                        request_id,
+                        details.get("voice", ""),
+                        details.get("started"),
+                        details.get("error", ""),
+                        details.get("error_type", ""),
+                        details.get("traceback", ""),
+                        json.dumps(details.get("progress", {})),
+                    ),
+                )
 
     def recover(self):
         """Called only under the process lock: a restart interrupts in-memory jobs."""
@@ -361,9 +390,30 @@ class AccessStore:
             return [
                 dict(r)
                 for r in db.execute("""SELECT r.id,r.user_id,COALESCE(u.name,'管理员') AS user_name,
-                r.key_id,r.chars,r.state,r.created,r.finished FROM requests r LEFT JOIN users u
-                ON u.id=r.user_id ORDER BY r.created DESC LIMIT 50""")
+                r.key_id,r.chars,r.state,r.created,r.finished,d.voice,d.started,d.error,
+                d.error_type,COALESCE(d.traceback!='',0) AS has_traceback
+                FROM requests r LEFT JOIN users u ON u.id=r.user_id
+                LEFT JOIN request_diagnostics d ON d.request_id=r.id
+                ORDER BY r.created DESC LIMIT 50""")
             ]
+
+    def request_detail(self, request_id: str):
+        """Admin-only payload, loaded on demand instead of in every queue poll."""
+        with self.tx() as db:
+            row = db.execute(
+                """SELECT r.id,r.user_id,COALESCE(u.name,'管理员') AS user_name,
+                r.key_id,r.chars,r.state,r.created,r.finished,d.request_id AS diagnostic_id,
+                d.voice,d.started,d.error,d.error_type,d.traceback,d.progress
+                FROM requests r LEFT JOIN users u ON u.id=r.user_id
+                LEFT JOIN request_diagnostics d ON d.request_id=r.id WHERE r.id=?""",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise ApiError(404, "调用记录不存在或已过保留期限")
+            result = dict(row)
+            result["diagnostics_available"] = result.pop("diagnostic_id") is not None
+            result["progress"] = json.loads(result["progress"] or "{}")
+            return result
 
     def load_config(self, defaults: dict):
         import json

@@ -31,6 +31,8 @@ class ControlledBackend(BaseBackend):
             self.order.append(job.text)
             self.started.set()
         try:
+            job.report_progress("loading_model")
+            job.report_progress("synthesizing")
             if job.text.startswith("hold"):
                 assert self.gate.wait(5), "test backend was not released"
             if job.text == "failure":
@@ -288,3 +290,56 @@ def test_database_failure_closes_admission_and_health(queue_service, monkeypatch
     assert s.wait(a, job["id"])["state"] == "failed"
     assert s.client.get("/healthz").status_code == 503
     assert s.submit(a, "another").status_code == 503
+
+
+def test_real_segment_progress_and_queued_position(queue_service):
+    s = queue_service
+    _, _, a = s.user("Progress")
+    _, _, b = s.user("Queued")
+    job = s.submit(a, "first。hold-second。", cut_punc="。").json()
+    deadline = time.monotonic() + 1
+    while len(s.backend.order) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    running = s.client.get(job["status_url"], headers=a).json()
+    assert running["state"] == "running"
+    assert running["progress"]["segments_completed"] == 1
+    assert running["progress"]["segment_percent"] == 50
+    assert running["progress"]["segment"] == running["progress"]["segments_total"] == 2
+    assert running["progress"]["stage"] == "synthesizing"
+    queued = s.submit(b, "waiting").json()
+    pending = s.client.get(queued["status_url"], headers=b).json()
+    assert pending["position"] == 1 and pending["progress"]["stage"] == "queued"
+    assert pending["progress"]["segment_percent"] is None
+    admin = s.client.get(f"/api/requests/{job['id']}", headers=s.admin).json()
+    assert admin["progress"]["segments_completed"] == 1
+    s.backend.gate.set()
+    finished = s.wait(a, job["id"])
+    assert finished["progress"]["stage"] == "completed"
+    assert finished["progress"]["segments_completed"] == 2
+    s.wait(b, queued["id"])
+
+
+def test_single_segment_is_indeterminate_and_cancel_preserves_counts(queue_service):
+    s = queue_service
+    _, _, a = s.user("Cancel progress")
+    job = s.submit(a, "hold-single").json()
+    assert s.backend.started.wait(1)
+    current = s.client.get(job["status_url"], headers=a).json()
+    assert current["progress"]["segment_percent"] is None
+    assert current["progress"]["segments_completed"] == 0
+    s.client.delete(job["status_url"], headers=a)
+    s.backend.gate.set()
+    final = s.wait(a, job["id"])
+    assert final["state"] == final["progress"]["stage"] == "cancelled"
+
+
+def test_progress_stops_at_output_duration_limit(queue_service):
+    s = queue_service
+    _, _, a = s.user("Output limit")
+    s.backend.synthesize = lambda job: (b"\0\0" * 32000, 32000)
+    job = s.submit(a, "one。two。three。", cut_punc="。", max_sec=0.5).json()
+    final = s.wait(a, job["id"])
+    assert final["state"] == "completed" and final["progress"]["truncated"]
+    assert final["progress"]["segments_completed"] == 1
+    assert final["progress"]["segments_total"] == 3
+    assert final["progress"]["output_seconds"] == 0.5

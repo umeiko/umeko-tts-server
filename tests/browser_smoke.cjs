@@ -103,6 +103,87 @@ fs.mkdirSync(out, { recursive: true });
           .toString(),
         "RIFF",
       );
+      const submitFixture = async (text, extra = {}) => {
+        const r = await fetch(base + "/v1/jobs", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ text, ...extra }),
+        });
+        assert.equal(r.status, 202);
+        return r.json();
+      };
+      const until = async (id, predicate) => {
+        for (let n = 0; n < 60; n++) {
+          const current = await (
+            await fetch(base + "/v1/jobs/" + id, { headers })
+          ).json();
+          if (predicate(current)) return current;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        throw new Error("fixture did not reach expected progress");
+      };
+      const failed = await submitFixture("fixture-failure");
+      await until(failed.id, (j) => j.state === "failed");
+      await page.getByRole("button", { name: "合成队列", exact: true }).click();
+      await page.getByRole("button", { name: "刷新", exact: true }).click();
+      const toggle = page.locator(
+        `#historyBody [data-action="toggle-request"][data-id="${failed.id}"]`,
+      );
+      await toggle.click();
+      const detail = page.locator(
+        `#historyBody [data-request-id="${failed.id}"]`,
+      );
+      await detail
+        .locator(".error-trace")
+        .filter({ hasText: "RuntimeError: Synthetic model failure" })
+        .waitFor();
+      assert.equal(await detail.locator(".error-trace img").count(), 0);
+      assert.equal(await page.evaluate(() => !!window.traceInjected), false);
+      await page.getByRole("button", { name: "刷新", exact: true }).click();
+      assert.equal(await toggle.getAttribute("aria-expanded"), "true");
+      assert.equal(await detail.locator(".error-trace").isVisible(), true);
+      if (port === 10991)
+        await page.screenshot({
+          path: path.join(out, "error-detail.png"),
+          fullPage: true,
+        });
+      const progressing = await submitFixture("fixture-first。fixture-hold。", {
+        cut_punc: "。",
+      });
+      const midway = await until(
+        progressing.id,
+        (j) => j.progress.segments_completed === 1 && j.state === "running",
+      );
+      assert.equal(midway.progress.segment_percent, 50);
+      await page.getByRole("button", { name: "刷新", exact: true }).click();
+      const active = page
+        .locator("#activeBody tr")
+        .filter({ hasText: progressing.id.slice(0, 10) });
+      await active
+        .locator(".job-progress")
+        .filter({ hasText: "第 2/2 段" })
+        .waitFor();
+      assert.equal(await active.locator("progress").getAttribute("value"), "1");
+      if (port === 10991)
+        await page.screenshot({
+          path: path.join(out, "progress.png"),
+          fullPage: true,
+        });
+      const session = await (
+        await context.request.get(base + "/api/auth/session")
+      ).json();
+      assert.equal(
+        (
+          await context.request.post(base + "/api/test/release-progress", {
+            headers: { "X-CSRF-Token": session.csrf_token },
+          })
+        ).status(),
+        200,
+      );
+      await until(progressing.id, (j) => j.state === "completed");
+      await page
+        .getByRole("button", { name: "用户与密钥", exact: true })
+        .click();
       await page.getByRole("button", { name: "刷新", exact: true }).click();
       await page.locator("#keyBody tr").filter({ hasText: name }).waitFor();
       if (port === 10991)
@@ -135,10 +216,45 @@ fs.mkdirSync(out, { recursive: true });
       });
       await page.getByRole("button", { name: "保存音色", exact: true }).click();
       await page.locator(".voice-card").filter({ hasText: voice }).waitFor();
+      await page.getByRole("button", { name: "接入文档", exact: true }).click();
+      await page.locator("#docVoice").selectOption(voice);
+      const syncExample = await page.locator("#docSync").textContent();
+      const asyncExample = await page.locator("#docAsync").textContent();
+      assert.ok(
+        syncExample.includes(JSON.stringify(voice)) &&
+          asyncExample.includes(JSON.stringify(voice)),
+      );
+      assert.ok(
+        (await page.locator("#docVoices").textContent()).includes(
+          base + "/v1/voices",
+        ),
+      );
+      const exampleBody = JSON.parse(syncExample.match(/-d '([^']+)'/)[1]);
+      const explicitVoice = await fetch(base + "/tts", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(exampleBody),
+      });
+      assert.equal(explicitVoice.status, 200);
+      assert.equal(
+        decodeURIComponent(explicitVoice.headers.get("x-voice")),
+        voice,
+      );
+      if (port === 10991)
+        await page.screenshot({
+          path: path.join(out, "voice-docs.png"),
+          fullPage: true,
+        });
+      await page
+        .getByRole("button", { name: "音色与试听", exact: true })
+        .click();
       await page
         .getByRole("button", { name: "生成语音 →", exact: true })
         .click();
       await page.locator("#audioResult:not(.hidden)").waitFor();
+      assert.ok(
+        (await page.locator("#synthProgress").textContent()).includes("已完成"),
+      );
       await page.getByRole("button", { name: "服务总览", exact: true }).click();
       await page.getByRole("button", { name: "刷新", exact: true }).click();
       if (port === 10991)

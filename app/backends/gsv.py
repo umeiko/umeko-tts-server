@@ -167,13 +167,16 @@ class GSVBackend(BaseBackend):
             self._pipeline.init_t2s_weights(job.gpt_weights)
             self._pipeline.init_vits_weights(job.sovits_weights)
         except Exception as e:
+            self._loaded = None
             raise BackendError(f"加载音色「{job.voice_name}」权重失败: {e}") from e
         self._loaded = key
 
     def synthesize(self, job: SynthesisJob) -> tuple[bytes, int]:
+        job.report_progress("loading_model")
         if self._pipeline is None:
             self.startup()
         self._ensure_weights(job)
+        job.report_progress("synthesizing")
         req = {
             "text": job.text,
             "text_lang": job.text_lang,
@@ -195,9 +198,17 @@ class GSVBackend(BaseBackend):
             "media_type": "wav",
         }
         try:
-            generator = self._pipeline.run(req)
-            sample_rate, audio = next(generator)
+            # GPT-SoVITS may yield silence before re-raising an inference error.
+            # Exhaust the non-streaming generator so errors and cleanup run;
+            # returning after next() would incorrectly mark that silence successful.
+            result = None
+            for result in self._pipeline.run(req):
+                pass
+            if result is None:
+                raise BackendError("模型未返回音频")
+            sample_rate, audio = result
         except Exception as e:
+            self._loaded = None
             raise BackendError(f"推理失败: {e}") from e
         return self._to_pcm16(audio), int(sample_rate)
 
