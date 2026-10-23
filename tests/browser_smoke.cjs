@@ -237,6 +237,12 @@ fs.mkdirSync(out, { recursive: true });
       });
       assert.equal(explicitVoice.status, 200);
       assert.equal(
+        Buffer.from(await explicitVoice.arrayBuffer())
+          .subarray(0, 4)
+          .toString(),
+        "RIFF",
+      );
+      assert.equal(
         decodeURIComponent(explicitVoice.headers.get("x-voice")),
         voice,
       );
