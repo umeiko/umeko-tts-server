@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.routing import Route
 
 from .access import AccessStore
 from .backends import GSVBackend, MockBackend
@@ -21,6 +22,7 @@ from .config import Settings
 from .engine import TTSEngine
 from .errors import ApiError
 from .process_lock import ProcessLock
+from .mcp_service import MCPService
 from .registry import VoiceRegistry
 from .routes_access import router as access_router
 from .routes_admin import router as admin_router
@@ -36,6 +38,7 @@ logger = logging.getLogger("umeko-tts")
 def create_app(settings: Settings | None = None, backend=None) -> FastAPI:
     settings = (settings or Settings.from_env()).validate()
     registry = VoiceRegistry(settings.data_dir)
+    mcp_service = MCPService()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -63,7 +66,8 @@ def create_app(settings: Settings | None = None, backend=None) -> FastAPI:
                 engine.capacity,
                 settings.base_path or "/",
             )
-            yield
+            async with mcp_service.run(app):
+                yield
         finally:
             try:
                 if engine:
@@ -77,7 +81,7 @@ def create_app(settings: Settings | None = None, backend=None) -> FastAPI:
 
     app = FastAPI(
         title="Umeko TTS Server",
-        version="2.0.0",
+        version="2.1.0",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -168,6 +172,12 @@ def create_app(settings: Settings | None = None, backend=None) -> FastAPI:
                     operation["security"] = [{"ApiKey": []}]
         return result
 
+    app.router.routes.append(
+        Route("/mcp", endpoint=mcp_service, methods=["GET", "POST", "DELETE"])
+    )
+    app.router.routes.append(
+        Route("/mcp/", endpoint=mcp_service, methods=["GET", "POST", "DELETE"])
+    )
     app.add_middleware(SecurityMiddleware, settings=settings)
     origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
     if origins:
@@ -176,7 +186,13 @@ def create_app(settings: Settings | None = None, backend=None) -> FastAPI:
             allow_origins=origins,
             allow_credentials=False,
             allow_methods=["GET", "POST", "DELETE"],
-            allow_headers=["Content-Type", "Authorization", "X-API-Key"],
+            allow_headers=[
+                "Content-Type",
+                "Authorization",
+                "X-API-Key",
+                "MCP-Protocol-Version",
+                "Mcp-Session-Id",
+            ],
             expose_headers=["X-Voice", "X-Inference-Ms", "Retry-After", "Location"],
         )
     app.add_middleware(PrefixMiddleware, settings=settings, routes=app.router.routes)

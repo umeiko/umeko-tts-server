@@ -173,6 +173,11 @@
                   <dd id="infoPrefix">/</dd>
                   <dt>结果保留</dt>
                   <dd id="infoRetention">—</dd>
+                  <dt>MCP 入口</dt>
+                  <dd>
+                    <code id="infoMcp">/mcp</code
+                    ><button data-jump="docs" class="quiet">接入说明</button>
+                  </dd>
                 </dl>
                 <div class="mini-note">
                   API Key
@@ -295,7 +300,8 @@
             <article class="panel">
               <h2>调用记录</h2>
               <p class="hint">
-                点击任务号展开详情与原始异常。详情保留 30 天，仅管理员可见。
+                点击任务号查看输入、排队时长、合成耗时、音频时长和原始异常。详情保留
+                30 天，仅管理员可见。
               </p>
               <div class="table-wrap">
                 <table>
@@ -430,6 +436,21 @@
               </p>
               <h3>3. 长任务：指定音色、查询进度、下载</h3>
               <pre id="docAsync"></pre>
+              <h3>MCP 服务入口</h3>
+              <p>
+                使用支持 Streamable HTTP 和自定义请求头的 MCP 客户端。 将下方
+                API_KEY
+                占位符替换为管理员发放的密钥；沿用同一用户的额度、优先级和排队规则。
+              </p>
+              <code id="docMcpUrl" class="code-block"></code>
+              <pre id="docMcp"></pre>
+              <p class="hint">
+                工具：<code>list_voices</code>、<code>get_my_limits</code>、<code>submit_synthesis</code>、
+                <code>get_job</code
+                >、<code>get_audio</code>、<code>cancel_job</code>。
+                提交后按任务号查询，完成后获取 WAV 音频内容；每次请求都需要 API
+                Key，不提供管理员操作工具。
+              </p>
               <p>
                 先提交任务，随后每 1–3 秒查询状态；<code>completed</code> 后通过
                 <code>audio_url</code> 下载。各次请求都需要 API

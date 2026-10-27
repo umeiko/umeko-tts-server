@@ -182,7 +182,7 @@ curl "$BASE/v1/jobs" \
 
 - 用户、Key 摘要、会话摘要、调用计数、额度和调度配置保存在 `TTS_DATA_DIR/access.sqlite3`；Unix 数据库权限为 0600。
 - 密钥原文只存在于创建响应；不要把它放入 URL、工单、截图或日志。通过环境变量给客户端传递。
-- 调用历史与管理员诊断保存 30 天，记录任务号、用户、密钥 ID、字符数、音色、时间、状态及捕获的异常；不主动保存输入正文或输出音频。第三方异常消息可能包含其自行附带的输入内容。管理员操作审计最多保留 2000 条。
+- 调用历史与管理员详情保存 30 天，包括用户、密钥 ID、输入文本、实际生效的合成参数、音色、排队时长、合成耗时、返回音频时长和捕获的异常。输入与参数只通过管理员 `/api/requests/{id}` 按需读取，不放入列表轮询、普通用户状态接口或 MCP 工具结果；不保存请求头、密钥原文或返回音频文件。旧记录无法补回未采集的输入与计时。管理员操作审计最多保留 2000 条。
 - 上游模型库可能自行打印推理内容，部署者应控制进程日志的访问与保留策略。
 - 停止服务后可备份整个数据目录。运行中备份 SQLite 请使用 SQLite backup API，不能只复制 `.sqlite3` 而遗漏 WAL。
 - `/healthz` 供源站健康检查使用，不要求登录，不返回密钥、用户或本机路径。ALB 可配置内部 `/healthz` 或带公开前缀的路径。
@@ -198,3 +198,62 @@ python -m pytest tests -q
 ```
 
 测试使用临时数据目录与受控测试后端；不会删除运行中服务的音色。
+
+## 本机 CPU 启动与仁菜音色
+
+完成 README 中的 Python、GPT-SoVITS 依赖和预训练模型安装后：
+
+```powershell
+# 单独安装仁菜，保留已安装音色与已有默认音色。
+.\.venv\Scripts\python.exe scripts/download_voices.py nina
+# 后台启动本机服务；网页、HTTP API 和 MCP 共用一个进程。
+.\scripts\start_local_cpu.ps1
+# 新机器也可合并安装和启动（不替代前面的运行时安装步骤）：
+.\scripts\start_local_cpu.ps1 -InstallNina
+```
+
+脚本绑定 `127.0.0.1:9880`，强制真实 CPU 推理；已有环境变量 `GSV_CONFIG` 会被沿用，也可传 `-Config`。
+未设置 `TTS_ADMIN_TOKEN` 时，首次生成随机管理员令牌，保存在 `data/admin-token.txt`，限制为当前 Windows 用户访问；后续启动复用该文件。
+控制台登录后在“音色与试听”选择 **仁菜**，或在合成请求中传 `"voice":"仁菜"`。
+音色包来自 `voices-v1.0.0` 的 `nina.zip`，其中包含权重、参考音频、来源、上游使用说明与校验信息；角色音色不因服务器代码开源而取得商业授权。
+
+调用详情中的 `queue_seconds` 使用单调时钟测量进入队列到获得推理名额的时长；
+`synthesis_seconds` 测量实际推理线程执行时间，包含权重切换、模型推理和 WAV 封装，不包含排队和客户端下载。
+`audio_seconds` 由返回 PCM 帧数与采样率计算，失败或取消且没有返回音频时为 `null`。
+输入按实际用于合成的规范化参数记录，升级自动建立补充表；已有用户、密钥、历史与额度继续保留。
+
+## MCP 接入
+
+同一服务增加 **Streamable HTTP** 入口：`<UMEKO_TTS_BASE_URL>/mcp`（本机为 `http://127.0.0.1:9880/mcp`）。
+每次请求均携带现有 API Key。它是预先发放密钥的接入方式，不实现 OAuth 登录发现流程；客户端需支持配置自定义请求头。
+配置示例（不同客户端字段名称可能不同，以其 HTTP MCP 配置为准）：
+
+```json
+{
+  "mcpServers": {
+    "umeko-tts": {
+      "type": "http",
+      "url": "http://127.0.0.1:9880/mcp",
+      "headers": {"Authorization": "Bearer <API_KEY>"}
+    }
+  }
+}
+```
+
+把占位符替换为管理员发放的密钥。工具包括：
+
+| 工具 | 用途 |
+|---|---|
+| `list_voices` | 查询可用音色名称，例如“仁菜” |
+| `get_my_limits` | 查询当前用户额度、频率和优先级 |
+| `submit_synthesis` | 参数与 `/tts` 一致，立即返回任务 ID，不保持长推理连接 |
+| `get_job` | 按 `job_id` 查询自己的进度、排队与合成时长 |
+| `get_audio` | 完成后按 `job_id` 返回 MCP `audio/wav` 音频内容 |
+| `cancel_job` | 取消自己的排队或运行任务 |
+
+客户端先 `initialize` / `tools/list`，调用 `submit_synthesis` 时传入 `{"voice":"仁菜","text":"你好。"}`，
+随后每 1–3 秒调用 `get_job`，`completed` 后调用 `get_audio`。所有任务复用现有并发、优先级、频率和字符额度，
+不能通过 MCP 访问其他用户任务或管理员调用详情；撤销密钥后立即拒绝请求。结果仍遵循音频缓存保留期。
+接口使用无状态 POST/JSON 响应，不依赖长连接 SSE 和服务端会话；GET/DELETE 返回 405。
+通过代理部署时设置完整的 HTTPS `UMEKO_TTS_BASE_URL`，以配置允许的外部 Host 和 Origin；默认只信任本机 Host。
+保留或剥离前缀均使用同一个入口，反向代理不需要额外启动 MCP 端口。

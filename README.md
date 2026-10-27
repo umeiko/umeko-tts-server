@@ -14,6 +14,7 @@ A text-to-speech service and admin console built on [GPT-SoVITS](https://github.
 - **Trusted-user access**: hashed API keys, user policies, expiry, rotation and revocation; browser admin sessions with CSRF protection
 - **Bounded scheduling**: global/per-user concurrency and queues, request/character quotas, priority with waiting-time aging
 - **Long jobs**: submit, poll, download and cancel asynchronous jobs behind an ALB
+- **MCP**: authenticated Streamable HTTP at `/mcp`; voice discovery, queued synthesis, progress, WAV audio and cancellation share the same user policies
 - **Web console**: voice management, online audition, task stages/segment progress, expandable admin-only error tracebacks, and API docs with voice selection — pure static pages, no build step
 - **Prebuilt voice packs**: one-command install from GitHub Release (`scripts/download_voices.py`)
 
@@ -105,10 +106,16 @@ Download into `GPT-SoVITS/GPT_SoVITS/pretrained_models/` (from [huggingface.co/l
 ```bash
 $PY scripts/download_voices.py            # all prebuilt voices
 $PY scripts/download_voices.py mambo      # or specific ones
+$PY scripts/download_voices.py nina       # Nina Iseri character voice
 # slow GitHub connection? use a mirror: --proxy-prefix https://ghfast.top/
 ```
 
 Or add your own voices later through the web console.
+
+### Nina Iseri character voice
+
+The **仁菜** (Nina Iseri) character voice is separately available as `nina.zip`. Install it with `scripts/download_voices.py nina`, then select **仁菜** in the console or pass `"voice":"仁菜"` in REST/MCP requests. It uses GPT-SoVITS v2 fine-tuned weights (character revision V3) and a separately sourced public Japanese character reference; provenance, hashes and non-commercial usage notes are included. Server code licensing does not grant character voice rights.
+For local Windows CPU deployment use `scripts/start_local_cpu.ps1 -InstallNina` after installing the runtime and pretrained models. See [deployment and MCP](docs/deployment.md).
 
 ### Mandarin narrator presets
 
@@ -282,5 +289,6 @@ umeko-tts-server/
 - Use asynchronous jobs for long requests behind an ALB. `max_sec` caps output duration, not the runtime of an individual model call.
 - Set `voice` to the exact `name` returned by authenticated `GET /v1/voices` in either `/tts` or `/v1/jobs`; omit it to use the default voice. The console's API docs generate both examples for your selected voice. See [voice selection, progress and diagnostics](docs/deployment.md#指定音色).
 - Job status exposes actual stages/segment counts; single-segment inference has no internal percentage. Admin-only request details retain captured Python exception chains for 30 days, including across restarts; older records cannot recover traces that were never saved.
+- Expanded administrator records include the actual synthesis text/parameters, queue time, inference time (including weight loading/WAV encoding) and returned audio duration. They persist for 30 days and are excluded from ordinary job status/MCP tools and list polling. Older inputs cannot be recovered retroactively.
 - On Windows, this project monkey-patches `torchaudio.load` with a soundfile implementation (`app/backends/gsv.py`), so no FFmpeg DLLs are needed for torchaudio ≥ 2.9
 - To publish your own voice packs: `$PY scripts/pack_voices.py`

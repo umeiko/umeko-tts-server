@@ -1,6 +1,9 @@
 import json
 import sqlite3
 import time
+import sys
+from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -62,7 +65,11 @@ def test_traceback_admin_only_persists_across_pruning_and_restart(tmp_path):
         assert "FileNotFoundError" in trace and "BackendError" in trace
         assert "direct cause" in trace and "/synthetic/model/weights.pth" in trace
         assert TOKEN not in trace and ("utts_" + "S" * 43) not in trace
-        assert "private request" not in json.dumps(detail)
+        assert detail["request"]["text"] == "private request"
+        assert detail["request"]["voice"] == "旁白"
+        assert detail["queue_seconds"] >= 0
+        assert detail["synthesis_seconds"] >= 0
+        assert detail["audio_seconds"] is None
         assert detail["voice"] == "旁白" and detail["started"]
         history = c.get("/api/queue", headers=admin).json()["history"]
         assert history[0]["has_traceback"] == 1
@@ -73,6 +80,9 @@ def test_traceback_admin_only_persists_across_pruning_and_restart(tmp_path):
         saved = c.get(f"/api/requests/{jid}", headers=admin).json()
         assert saved["traceback"] == trace and saved["progress"]["stage"] == "failed"
         assert saved["run_seconds"] >= 0
+        assert saved["request"] == detail["request"]
+        assert saved["queue_seconds"] == detail["queue_seconds"]
+        assert saved["synthesis_seconds"] == detail["synthesis_seconds"]
         assert c.get("/api/requests/unknown", headers=admin).status_code == 404
 
 
@@ -89,6 +99,7 @@ def test_legacy_history_upgrade_and_retention_cascade(tmp_path):
     try:
         old = store.request_detail("old")
         assert not old["diagnostics_available"] and old["traceback"] is None
+        assert old["request"] is None and old["audio_seconds"] is None
         assert store.request_history()[0]["has_traceback"] == 0
         from app.access import Principal
 
@@ -147,3 +158,29 @@ def test_gsv_rejects_empty_generator():
     backend._ensure_weights = lambda job: None
     with pytest.raises(BackendError, match="模型未返回音频"):
         backend.synthesize(synthesis_job())
+
+
+@pytest.mark.parametrize("dictionary_name", ["dictionary", "日语词典"])
+def test_windows_japanese_dictionary_can_use_ascii_path(
+    tmp_path, monkeypatch, dictionary_name
+):
+    root = tmp_path / "中文工作区"
+    work = root / "GPT-SoVITS"
+    work.mkdir(parents=True)
+    dictionary = root / dictionary_name
+    dictionary.mkdir()
+    (dictionary / "sys.dic").write_bytes(b"synthetic dictionary fixture")
+    initialized = []
+    fake = SimpleNamespace(
+        OPEN_JTALK_DICT_DIR=str(dictionary).encode("utf-8"),
+        _global_jtalk=object(),
+        _lazy_init=lambda: initialized.append(True),
+    )
+    monkeypatch.setitem(sys.modules, "pyopenjtalk", fake)
+    monkeypatch.chdir(work)
+    GSVBackend._prepare_japanese_dictionary()
+    assert initialized and fake.OPEN_JTALK_DICT_DIR.isascii()
+    assert fake._global_jtalk is None
+    assert (
+        Path(fake.OPEN_JTALK_DICT_DIR.decode("ascii")) / "sys.dic"
+    ).read_bytes() == b"synthetic dictionary fixture"

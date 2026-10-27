@@ -4,6 +4,7 @@
 用法:
     python scripts/download_voices.py                 # 下载全部预置音色
     python scripts/download_voices.py mambo           # 只下载指定音色（用资源名）
+    python scripts/download_voices.py nina            # 仁菜（井芹仁菜），保留已有默认音色
     python scripts/download_voices.py --tag TAG       # 指定 release tag
     python scripts/download_voices.py --proxy-prefix https://ghfast.top/   # 走加速镜像
 
@@ -121,7 +122,7 @@ def install_pack(zpath: Path, data_dir: Path = DATA) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="下载预置音色权重包")
-    ap.add_argument("assets", nargs="*", help="只下载指定资源名（如 mambo），默认全部")
+    ap.add_argument("assets", nargs="*", help="只下载指定资源名（如 mambo、nina、narrator_male），默认全部")
     ap.add_argument("--tag", default=DEFAULT_TAG, help=f"release tag，默认 {DEFAULT_TAG}")
     ap.add_argument("--repo", default=REPO, help=f"GitHub 仓库，默认 {REPO}")
     ap.add_argument("--file", type=Path, action="append", default=[], help="安装本地音色 zip，可重复传入")

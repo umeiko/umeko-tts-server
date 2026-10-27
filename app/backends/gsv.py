@@ -5,10 +5,12 @@
 - 调度器将此共享管线的推理容量限制为 1，权重切换不会与其他推理交错。
 - 重依赖（torch / numpy / GPT_SoVITS）全部延迟导入，未安装时给出中文指引。
 """
+
 from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -69,6 +71,7 @@ class GSVBackend(BaseBackend):
             os.chdir(root)
             try:
                 import torch
+
                 _patch_torchaudio_load()
                 from GPT_SoVITS.TTS_infer_pack.TTS import TTS, TTS_Config
             except ImportError as e:
@@ -80,7 +83,10 @@ class GSVBackend(BaseBackend):
             if device == "auto":
                 if torch.cuda.is_available():
                     device = "cuda"
-                elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+                elif (
+                    getattr(torch.backends, "mps", None)
+                    and torch.backends.mps.is_available()
+                ):
                     device = "mps"
                 else:
                     device = "cpu"
@@ -108,8 +114,12 @@ class GSVBackend(BaseBackend):
     def _config_weights_key(tts_config) -> tuple[str, str] | None:
         try:
             custom = getattr(tts_config, "configs", {}).get("custom", {})
-            gpt = custom.get("t2s_weights_path") or getattr(tts_config, "t2s_weights_path", "")
-            sovits = custom.get("vits_weights_path") or getattr(tts_config, "vits_weights_path", "")
+            gpt = custom.get("t2s_weights_path") or getattr(
+                tts_config, "t2s_weights_path", ""
+            )
+            sovits = custom.get("vits_weights_path") or getattr(
+                tts_config, "vits_weights_path", ""
+            )
             if gpt and sovits:
                 return (os.path.abspath(gpt), os.path.abspath(sovits))
         except Exception:
@@ -176,6 +186,8 @@ class GSVBackend(BaseBackend):
         if self._pipeline is None:
             self.startup()
         self._ensure_weights(job)
+        if os.name == "nt" and ({job.ref_lang, job.text_lang} & {"ja", "auto"}):
+            self._prepare_japanese_dictionary()
         job.report_progress("synthesizing")
         req = {
             "text": job.text,
@@ -211,6 +223,33 @@ class GSVBackend(BaseBackend):
             self._loaded = None
             raise BackendError(f"推理失败: {e}") from e
         return self._to_pcm16(audio), int(sample_rate)
+
+    @staticmethod
+    def _prepare_japanese_dictionary():
+        """Initialize before upstream's import-time path workaround on Windows.
+
+        A fresh dictionary is downloaded lazily. Upstream attempts its path
+        workaround before that download, then MeCab cannot open a Unicode path.
+        Prefer an ASCII relative path; copy only when the relative path also
+        contains non-ASCII components. The process cwd is the GPT-SoVITS root.
+        """
+        import pyopenjtalk
+
+        initialize = getattr(pyopenjtalk, "_lazy_init", None)
+        if initialize:
+            initialize()
+        raw = pyopenjtalk.OPEN_JTALK_DICT_DIR
+        path = Path(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        if str(path).isascii():
+            return
+        relative = os.path.relpath(path)
+        if not relative.isascii():
+            target = Path("TEMP/umeko-open-jtalk-dic")
+            if not (target / "sys.dic").is_file():
+                shutil.copytree(path, target, dirs_exist_ok=True)
+            relative = str(target)
+        pyopenjtalk.OPEN_JTALK_DICT_DIR = relative.encode("ascii")
+        pyopenjtalk._global_jtalk = None
 
     @staticmethod
     def _to_pcm16(audio) -> bytes:

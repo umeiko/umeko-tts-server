@@ -92,6 +92,10 @@ class AccessStore:
                 error TEXT NOT NULL DEFAULT '', error_type TEXT NOT NULL DEFAULT '',
                 traceback TEXT NOT NULL DEFAULT '', progress TEXT NOT NULL DEFAULT '{}'
             );
+            CREATE TABLE IF NOT EXISTS request_payloads (
+                request_id TEXT PRIMARY KEY REFERENCES requests(id) ON DELETE CASCADE,
+                input_json TEXT, queue_seconds REAL, synthesis_seconds REAL, audio_seconds REAL
+            );
             CREATE TABLE IF NOT EXISTS service_config (id INTEGER PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, at REAL NOT NULL,
                 action TEXT NOT NULL, target TEXT NOT NULL);
@@ -288,7 +292,9 @@ class AccessStore:
             self._audit(db, "key.rotate", key_id)
             return result
 
-    def reserve(self, request_id: str, principal: Principal, chars: int, voice=""):
+    def reserve(
+        self, request_id: str, principal: Principal, chars: int, voice="", request=None
+    ):
         now, day = time.time(), quota_day()
         with self.tx() as db:
             p = self._policy(db, principal.user_id, principal.key_id)
@@ -326,6 +332,15 @@ class AccessStore:
                 "INSERT INTO request_diagnostics(request_id,voice) VALUES(?,?)",
                 (request_id, voice),
             )
+            db.execute(
+                "INSERT INTO request_payloads(request_id,input_json) VALUES(?,?)",
+                (
+                    request_id,
+                    json.dumps(request, ensure_ascii=False)
+                    if request is not None
+                    else None,
+                ),
+            )
             if p.key_id:
                 db.execute(
                     "UPDATE api_keys SET last_used=? WHERE id=?", (now, p.key_id)
@@ -335,6 +350,17 @@ class AccessStore:
                 (now - 30 * 86400,),
             )
             return p
+
+    def start_request(self, request_id: str, started: float, queue_seconds: float):
+        with self.tx() as db:
+            db.execute(
+                "UPDATE request_diagnostics SET started=? WHERE request_id=?",
+                (started, request_id),
+            )
+            db.execute(
+                "UPDATE request_payloads SET queue_seconds=? WHERE request_id=?",
+                (queue_seconds, request_id),
+            )
 
     def finish(self, request_id: str, outcome: str, details=None):
         with self.tx() as db:
@@ -357,6 +383,15 @@ class AccessStore:
                 (outcome, time.time(), request_id),
             )
             if details is not None:
+                db.execute(
+                    "UPDATE request_payloads SET queue_seconds=?,synthesis_seconds=?,audio_seconds=? WHERE request_id=?",
+                    (
+                        details.get("queue_seconds"),
+                        details.get("synthesis_seconds"),
+                        details.get("audio_seconds"),
+                        request_id,
+                    ),
+                )
                 db.execute(
                     """INSERT INTO request_diagnostics
                     (request_id,voice,started,error,error_type,traceback,progress)
@@ -403,9 +438,11 @@ class AccessStore:
             row = db.execute(
                 """SELECT r.id,r.user_id,COALESCE(u.name,'管理员') AS user_name,
                 r.key_id,r.chars,r.state,r.created,r.finished,d.request_id AS diagnostic_id,
-                d.voice,d.started,d.error,d.error_type,d.traceback,d.progress
+                d.voice,d.started,d.error,d.error_type,d.traceback,d.progress,
+                p.input_json,p.queue_seconds,p.synthesis_seconds,p.audio_seconds
                 FROM requests r LEFT JOIN users u ON u.id=r.user_id
-                LEFT JOIN request_diagnostics d ON d.request_id=r.id WHERE r.id=?""",
+                LEFT JOIN request_diagnostics d ON d.request_id=r.id
+                LEFT JOIN request_payloads p ON p.request_id=r.id WHERE r.id=?""",
                 (request_id,),
             ).fetchone()
             if row is None:
@@ -413,6 +450,8 @@ class AccessStore:
             result = dict(row)
             result["diagnostics_available"] = result.pop("diagnostic_id") is not None
             result["progress"] = json.loads(result["progress"] or "{}")
+            payload = result.pop("input_json")
+            result["request"] = json.loads(payload) if payload is not None else None
             return result
 
     def load_config(self, defaults: dict):

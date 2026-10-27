@@ -1,6 +1,8 @@
 import threading
+import io
 import sqlite3
 import time
+import wave
 
 import pytest
 from fastapi.testclient import TestClient
@@ -343,3 +345,48 @@ def test_progress_stops_at_output_duration_limit(queue_service):
     assert final["progress"]["segments_completed"] == 1
     assert final["progress"]["segments_total"] == 3
     assert final["progress"]["output_seconds"] == 0.5
+
+
+def test_admin_request_input_and_separate_timing_metrics(queue_service):
+    s = queue_service
+    _, _, a = s.user("Timing A")
+    _, _, b = s.user("Timing B")
+    first = s.submit(a, "hold").json()
+    assert s.backend.started.wait(1)
+    text = "Synthetic private input <img src=x onerror=alert(1)>"
+    second = s.submit(b, text, speed_factor=4).json()
+    time.sleep(0.04)
+    pending = s.client.get(f"/api/requests/{second['id']}", headers=s.admin).json()
+    assert pending["request"]["text"] == text
+    assert pending["request"]["speed_factor"] == 2
+    assert pending["queue_seconds"] >= 0.03
+    assert pending["synthesis_seconds"] is None
+    assert pending["audio_seconds"] is None
+    assert text not in s.client.get("/api/queue", headers=s.admin).text
+    s.backend.gate.set()
+    s.wait(a, first["id"])
+    finished = s.wait(b, second["id"])
+    detail = s.client.get(f"/api/requests/{second['id']}", headers=s.admin).json()
+    assert detail["queue_seconds"] >= 0.03
+    assert detail["synthesis_seconds"] >= 0
+    audio = s.client.get(finished["audio_url"], headers=b).content
+    with wave.open(io.BytesIO(audio)) as wav:
+        assert detail["audio_seconds"] == wav.getnframes() / wav.getframerate() == 0.01
+    assert "request" not in finished and "text" not in finished
+    assert s.client.get(f"/api/requests/{second['id']}", headers=b).status_code == 401
+
+
+def test_cancelled_queued_request_has_no_synthesis_or_returned_audio(queue_service):
+    s = queue_service
+    _, _, a = s.user("Queue timing")
+    first = s.submit(a, "hold").json()
+    assert s.backend.started.wait(1)
+    second = s.submit(a, "queued input").json()
+    s.client.delete(second["status_url"], headers=a)
+    detail = s.client.get(f"/api/requests/{second['id']}", headers=s.admin).json()
+    assert detail["queue_seconds"] >= 0
+    assert detail["started"] is None
+    assert detail["synthesis_seconds"] is detail["audio_seconds"] is None
+    assert detail["request"]["text"] == "queued input"
+    s.backend.gate.set()
+    s.wait(a, first["id"])

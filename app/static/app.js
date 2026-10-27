@@ -136,6 +136,7 @@ function page(name) {
 }
 
 function renderStatus() {
+  $("#infoMcp").textContent = prefix + "/mcp";
   const s = state.status,
     e = s.engine,
     q = e.queue,
@@ -227,10 +228,24 @@ function requestDetailMarkup(id) {
   if (!d) return '<p class="hint" role="status">正在读取调用详情…</p>';
   if (d.load_error)
     return `<p class="error-text">${esc(d.load_error)}，收起后可重新展开。</p>`;
+  const seconds = (n) =>
+    n === null || n === undefined ? "未采集" : `${Number(n).toFixed(3)} 秒`;
+  const running = ["running", "cancelling"].includes(d.state);
+  const input = d.request;
+  const parameters = input
+    ? Object.fromEntries(
+        Object.entries(input).filter(([key]) => key !== "text"),
+      )
+    : null;
   return `<div class="request-meta">
     <span>任务号<code>${esc(id)}</code></span><span>音色<strong>${esc(d.voice || "旧记录未保存")}</strong></span>
-    <span>开始时间<strong>${d.started ? esc(date(d.started)) : "尚未开始"}</strong></span>
-    <span>结束时间<strong>${d.finished ? esc(date(d.finished)) : "尚未结束"}</strong></span></div>
+    <span>开始时间<strong>${d.started ? esc(date(d.started)) : input ? "尚未开始" : "旧记录未采集"}</strong></span>
+    <span>结束时间<strong>${d.finished ? esc(date(d.finished)) : "尚未结束"}</strong></span>
+    <span>排队时长<strong>${seconds(d.queue_seconds)}${d.state === "queued" ? "（仍在等待）" : ""}</strong></span>
+    <span>合成耗时<strong>${running ? `进行中 · 已用 ${seconds(d.run_seconds)}` : !input && d.synthesis_seconds == null ? "旧记录未采集" : d.started ? seconds(d.synthesis_seconds) : "尚未开始"}</strong></span>
+    <span>返回音频时长<strong>${d.state === "completed" ? seconds(d.audio_seconds) : "暂无返回音频"}</strong></span></div>
+    <div class="request-input"><h3>输入文本</h3>${input ? `<pre class="input-text" tabindex="0">${esc(input.text)}</pre><details class="request-parameters"><summary>查看实际合成参数</summary><pre>${esc(JSON.stringify(parameters, null, 2))}</pre></details>` : '<p class="hint">旧记录未采集输入文本和参数，无法补回。</p>'}</div>
+    <p class="hint">排队时长不含合成；合成耗时包含音色加载、模型推理和 WAV 封装，不含网络下载。</p>
     ${progressMarkup(d)}${d.error ? `<p class="error-text">${esc(d.error)}</p>` : ""}
     ${
       d.traceback
@@ -270,14 +285,23 @@ function renderQueue() {
       const positions = new Map(
         $$(".request-detail-row", body).map((row) => [
           row.dataset.requestId,
-          $("pre", row)?.scrollTop || 0,
+          {
+            scrolls: $$("pre", row).map((pre) => pre.scrollTop),
+            parametersOpen: $(".request-parameters", row)?.open || false,
+          },
         ]),
       );
       body.innerHTML = html;
       body.dataset.rendered = html;
       $$(".request-detail-row", body).forEach((row) => {
-        const pre = $("pre", row);
-        if (pre) pre.scrollTop = positions.get(row.dataset.requestId) || 0;
+        const saved = positions.get(row.dataset.requestId);
+        if (saved) {
+          $$("pre", row).forEach(
+            (pre, index) => (pre.scrollTop = saved.scrolls[index] || 0),
+          );
+          const parameters = $(".request-parameters", row);
+          if (parameters) parameters.open = saved.parametersOpen;
+        }
       });
     }
   }
@@ -545,6 +569,20 @@ function fillDocs() {
     ? configuredBase
     : location.origin + prefix;
   $("#docBase").textContent = base;
+  $("#docMcpUrl").textContent = base + "/mcp";
+  $("#docMcp").textContent = JSON.stringify(
+    {
+      mcpServers: {
+        "umeko-tts": {
+          type: "http",
+          url: base + "/mcp",
+          headers: { Authorization: "Bearer <API_KEY>" },
+        },
+      },
+    },
+    null,
+    2,
+  );
   const selected = $("#docVoice").value;
   const ready = state.voices.filter(
     (v) => v.is_complete || state.status?.engine.backend.demo,

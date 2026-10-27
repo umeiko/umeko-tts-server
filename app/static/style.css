@@ -539,6 +539,27 @@ input[type="checkbox"] {
   line-height: 1.7;
   font-size: 12px;
 }
+.input-text,
+.request-parameters pre {
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #edf2fa;
+  color: var(--ink);
+  padding: 16px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.request-input h3 {
+  margin: 18px 0 8px;
+}
+.request-parameters summary {
+  cursor: pointer;
+  color: var(--blue);
+  margin: 12px 0;
+}
 .job-progress {
   min-width: 210px;
   margin: 10px 0;

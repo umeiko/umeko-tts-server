@@ -138,6 +138,13 @@ fs.mkdirSync(out, { recursive: true });
         .filter({ hasText: "RuntimeError: Synthetic model failure" })
         .waitFor();
       assert.equal(await detail.locator(".error-trace img").count(), 0);
+      assert.equal(
+        await detail.locator(".input-text").textContent(),
+        "fixture-failure",
+      );
+      assert.ok((await detail.textContent()).includes("排队时长"));
+      assert.ok((await detail.textContent()).includes("合成耗时"));
+      assert.ok((await detail.textContent()).includes("返回音频时长"));
       assert.equal(await page.evaluate(() => !!window.traceInjected), false);
       await page.getByRole("button", { name: "刷新", exact: true }).click();
       assert.equal(await toggle.getAttribute("aria-expanded"), "true");
@@ -229,6 +236,24 @@ fs.mkdirSync(out, { recursive: true });
           base + "/v1/voices",
         ),
       );
+      assert.equal(
+        await page.locator("#docMcpUrl").textContent(),
+        base + "/mcp",
+      );
+      assert.ok(
+        (await page.locator("#docMcp").textContent()).includes(base + "/mcp"),
+      );
+      const mcpResponse = await fetch(base + "/mcp", {
+        method: "POST",
+        headers: {
+          ...headers,
+          Accept: "application/json",
+          "MCP-Protocol-Version": "2025-11-25",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      });
+      assert.equal(mcpResponse.status, 200);
+      assert.equal((await mcpResponse.json()).result.tools.length, 6);
       const exampleBody = JSON.parse(syncExample.match(/-d '([^']+)'/)[1]);
       const explicitVoice = await fetch(base + "/tts", {
         method: "POST",

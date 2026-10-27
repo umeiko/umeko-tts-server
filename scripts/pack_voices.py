@@ -21,6 +21,7 @@ ASSET_NAMES = {
     "爱音": "chihaya_anon",
     "播音男声": "narrator_male",
     "播音女声": "narrator_female",
+    "仁菜": "nina",
 }
 
 

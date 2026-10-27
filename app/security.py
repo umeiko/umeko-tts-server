@@ -149,7 +149,7 @@ class SecurityMiddleware:
                 "/api/auth/session",
             ):
                 verify_admin(request)
-            elif path == "/tts" or path.startswith("/v1/"):
+            elif path == "/tts" or path.startswith("/v1/") or path in ("/mcp", "/mcp/"):
                 request.state.principal = verify_tts(request)
             upload = path.startswith("/api/voices") and request.method in (
                 "POST",

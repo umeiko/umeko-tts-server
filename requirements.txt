@@ -1,3 +1,6 @@
 fastapi>=0.143,<1
 uvicorn>=0.29
 python-multipart>=0.0.32,<1
+mcp>=1.30,<2
+# The Japanese GPT-SoVITS frontend imports pkg_resources.
+setuptools>=70,<81

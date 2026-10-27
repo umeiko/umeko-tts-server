@@ -43,6 +43,9 @@ class Job:
     state: str = "queued"
     started: float | None = None
     finished: float | None = None
+    queue_seconds: float | None = None
+    synthesis_seconds: float | None = None
+    audio_seconds: float | None = None
     cancel: threading.Event = field(default_factory=threading.Event)
     wav: bytes | None = None
     meta: dict = field(default_factory=dict)
@@ -126,7 +129,9 @@ class TTSEngine:
         if sum(j.principal.user_id == p.user_id for j in queued) >= p.max_queue:
             raise QueueFullError("该用户的排队请求数已达上限")
         jid = uuid.uuid4().hex
-        p = self.store.reserve(jid, p, len(params.text), voice.name)
+        p = self.store.reserve(
+            jid, p, len(params.text), voice.name, params.model_dump()
+        )
         # No yield between admission, quota reservation and queue insertion.
         job = Job(
             jid,
@@ -224,6 +229,7 @@ class TTSEngine:
                     self._capture_error(job, exc)
                 job.state, job.error_status = "failed", 503
                 job.error, job.finished = "调度服务不可用，请稍后重试", time.time()
+                job.queue_seconds = round(max(0, time.monotonic() - job.queued_at), 4)
                 self._progress(job, stage="failed")
                 job.params = None
                 self._counts["failed"] += 1
@@ -254,7 +260,10 @@ class TTSEngine:
                 )
                 if job is None:
                     break
-                job.state, job.started = "running", time.time()
+                started = time.time()
+                queued = round(max(0, time.monotonic() - job.queued_at), 4)
+                self.store.start_request(job.id, started, queued)
+                job.state, job.started, job.queue_seconds = "running", started, queued
                 self._progress(job, stage="starting")
                 self._running[job.id] = job
                 task = asyncio.create_task(self._execute(job), name="tts-" + job.id)
@@ -277,6 +286,7 @@ class TTSEngine:
                 job.cancel.set()
                 wav = await work
             if job.cancel.is_set():
+                job.audio_seconds = None
                 self._finish(job, "cancelled", "任务已取消", 409)
             else:
                 job.wav = wav
@@ -299,6 +309,10 @@ class TTSEngine:
     def _finish(self, job: Job, state: str, error="", status=500):
         if job.state in TERMINAL:
             return
+        if job.queue_seconds is None:
+            job.queue_seconds = round(max(0, time.monotonic() - job.queued_at), 4)
+        if state != "completed":
+            job.audio_seconds = None
         self._progress(job, stage=state)
         try:
             self.store.finish(
@@ -311,6 +325,9 @@ class TTSEngine:
                     "error_type": job.error_type,
                     "traceback": job.error_traceback,
                     "progress": self._progress_info(job),
+                    "queue_seconds": job.queue_seconds,
+                    "synthesis_seconds": job.synthesis_seconds,
+                    "audio_seconds": job.audio_seconds,
                 },
             )
         except sqlite3.Error as exc:
@@ -387,6 +404,11 @@ class TTSEngine:
             "position": waiting.index(job) + 1 if job in waiting else None,
             "error": job.error,
             "progress": self._progress_info(job),
+            "queue_seconds": job.queue_seconds
+            if job.queue_seconds is not None
+            else round(max(0, time.monotonic() - job.queued_at), 4),
+            "synthesis_seconds": job.synthesis_seconds,
+            "audio_seconds": job.audio_seconds,
             "elapsed_seconds": round(
                 max(0, (job.finished or time.time()) - job.created), 1
             ),
@@ -484,6 +506,13 @@ class TTSEngine:
         self._executor.shutdown(wait=True)
 
     def _run(self, job: Job) -> bytes:
+        started = time.perf_counter()
+        try:
+            return self._generate_wav(job)
+        finally:
+            job.synthesis_seconds = round(max(0, time.perf_counter() - started), 4)
+
+    def _generate_wav(self, job: Job) -> bytes:
         params, voice = job.params, job.voice
         pcm, sr = bytearray(), 0
         segments = self._split_text(params.text, params.cut_punc)
@@ -513,6 +542,7 @@ class TTSEngine:
             w.setsampwidth(2)
             w.setframerate(sr or 32000)
             w.writeframes(pcm)
+        job.audio_seconds = len(pcm) / (2 * (sr or 32000))
         return buf.getvalue()
 
     def _build_job(self, voice: Voice, params: TTSRequest, text: str) -> SynthesisJob:

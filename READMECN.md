@@ -16,6 +16,7 @@
 - **长任务接口**：异步提交、查询、下载与取消，适合多人排队与 ALB 访问
 - **Web 控制台**：音色管理、在线试听、实时队列状态、接口文档，纯静态页面无需构建
 - **预置音色包**：从 GitHub Release 一键安装（`scripts/download_voices.py`）
+- **MCP 接入**：`/mcp` 提供 Streamable HTTP 入口，复用 API Key、用户额度与队列，支持查询音色、合成、进度、音频和取消
 
 ## 硬件需求
 
@@ -105,10 +106,18 @@ $PY -c "import nltk; nltk.download('cmudict'); nltk.download('averaged_perceptro
 ```bash
 $PY scripts/download_voices.py            # 安装全部预置音色
 $PY scripts/download_voices.py mambo      # 或只装指定的
+$PY scripts/download_voices.py nina       # 仁菜（井芹仁菜）
 # GitHub 直连慢：--proxy-prefix https://ghfast.top/
 ```
 
 之后也可以在 Web 控制台里上传自己的音色。
+
+### 仁菜（井芹仁菜）音色
+
+安装 `nina.zip` 后，在“音色与试听”选择 **仁菜**，或在 HTTP / MCP 合成中传入 `"voice":"仁菜"`。
+权重使用 GPT-SoVITS v2 架构，文件名 V3 表示音色修订号；另配同角色公开日语合成样本作为参考音频，包内保留来源、校验和非商业使用说明。服务器代码许可证不授予角色音色商业权利。
+Windows 本机 CPU 启动：安装推理环境和预训练模型后运行 `scripts/start_local_cpu.ps1 -InstallNina`。
+网页、API 与 MCP 共用服务，首次生成的管理员令牌保存在本机 `data/admin-token.txt`。详见[部署与 MCP 接入](docs/deployment.md)。
 
 ### 正式中文旁白音色
 
@@ -211,6 +220,7 @@ $env:TTS_BACKEND="gsv"; $env:GSV_DEVICE="auto"; & .venv/Scripts/python.exe -m ap
 
 任务状态接口新增真实阶段、已用时间与分段完成数；单段模型推理没有内部百分比，网页显示进行中动画。
 管理员可展开调用记录查看并复制原始 Python 异常链，诊断随记录保留 30 天，重启后仍可查看；普通 API Key 无权读取。
+展开详情还可查看实际合成输入与参数、排队时长、合成耗时和返回音频时长；这些内容仅管理员按需读取，列表、普通任务状态与 MCP 工具结果不返回输入正文。
 旧记录无法补回未采集的错误。细节见[进度与错误详情](docs/deployment.md#进度与管理员错误详情)。
 
 ```bash
